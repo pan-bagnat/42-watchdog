@@ -1,0 +1,14 @@
+# This file is the default config
+# Use it as template to create your own config.yml
+
+# Runtime and secret values now come from `.env`.
+# This YAML file is kept only for structured settings that are easier to edit here.
+
+watchtime:
+    monday:     [["07:30:00", "20:30:00"]]
+    tuesday:    [["07:30:00", "20:30:00"]]
+    wednesday:  [["07:30:00", "20:30:00"]]
+    thursday:   [["07:30:00", "20:30:00"]]
+    friday:     [["07:30:00", "20:30:00"]]
+    saturday:   []
+    sunday:     []

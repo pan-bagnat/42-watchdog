@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+api.log
+watchdog-server
+watchdog-client
+node_modules
+frontend/node_modules
+frontend/dist
+example
+tmp.log
+test.log
+*.log
