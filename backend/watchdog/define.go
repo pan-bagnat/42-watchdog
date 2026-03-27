@@ -5,8 +5,7 @@ import (
 	"time"
 )
 
-var AllUsers map[int]User
-var AllUsersMutex sync.Mutex
+var stateMutationMutex sync.Mutex
 
 const (
 	NO_BADGE       string = "User didn't badged yet"

@@ -72,13 +72,44 @@ docker compose up --build
 
 This starts:
 
+* `watchdog-db` for Watchdog persistence
+* `adminer` on `http://localhost:8088` to inspect Watchdog data
 * `backend` on the internal Docker network
 * `frontend` on the internal Docker network
-* `nginx` on `http://localhost:8080`
+* `nginx` on `http://localhost`
+
+When `AUTH_MODE=local`, Compose also starts:
+
+* `auth-db` for the local auth service session store
+* `auth-migrator` to initialize the auth database schema
+* `auth` for local authentication
+
+Compose files are split like this:
+
+* `docker-compose.yml`: base stack, always used
+* `docker-compose.auth-local.yml`: extra auth services for `AUTH_MODE=local`
+
+The root `Makefile` reads `AUTH_MODE` from `.env` and automatically picks the right Compose files:
+
+* `AUTH_MODE=local` → `docker-compose.yml` + `docker-compose.auth-local.yml`
+* `AUTH_MODE=panbagnat` → `docker-compose.yml` only
+
+Equivalent raw Docker Compose commands:
+
+```bash
+# External auth
+docker compose -f docker-compose.yml up --build
+
+# Local auth
+docker compose -f docker-compose.yml -f docker-compose.auth-local.yml up --build
+```
 
 Routing:
 
 * `/` → React frontend
+* `/login` → React login page
+* `/auth/*` → backend auth bridge
+* `/api/auth/me` → current authenticated user
 * `/api/admin/commands` → backend admin command route
 * `/api/admin/students` → backend admin student routes
 * `/api/student/me` → backend student self route
@@ -154,7 +185,7 @@ All commands are sent by default to `http://localhost:8042/commands` — overrid
 watchdog-client --url <custom-url> <command>
 ```
 
-When calling a remote secured server, the client can forward Panbagnat auth headers:
+When calling a remote secured server, the client can forward auth headers:
 
 ```bash
 watchdog-client \
@@ -165,12 +196,7 @@ watchdog-client \
 
 You can also use `--cookie` or `--session-id`, or set `WATCHDOG_AUTHORIZATION`, `WATCHDOG_COOKIE`, or `WATCHDOG_SESSION_ID`.
 
-The React frontend offers the same command flow through nginx and lets you send:
-
-* `Authorization`
-* `X-Session-Id`
-
-It does not try to forge a raw `Cookie` header in the browser.
+The React frontend now uses the same `/login` flow as the reference example and relies on browser cookies / upstream auth routing rather than manual header entry.
 
 ## ⚙️ Configuration split
 
@@ -185,15 +211,18 @@ Moved to `backend/.env`:
 * 42 API v2 endpoint, credentials, campus id, apprentice projects
 * 42 Chronos endpoint, credentials, and `autoPost`
 * Mailer settings
+* `WATCHDOG_POSTGRES_URL` for Watchdog persistent storage
 * `WEBHOOK_SECRET`
-* Panbagnat auth settings
+* Auth mode and auth service settings
 
 For Docker Compose:
 
 * `backend/.env` is injected into the backend container
 * `backend/config.yml` is mounted read-only into the backend container
+* Watchdog persistence is stored in `watchdog-db` (PostgreSQL)
+* Adminer is available on `http://localhost:8088`
 
-## 🔐 Remote command authentication
+## 🔐 Authentication
 
 Admin routes and student routes are now separated.
 
@@ -210,10 +239,13 @@ Student:
 Auth:
 
 * Local admin requests to `localhost` / `127.0.0.1` keep working without extra auth, which preserves the VM's local automation and cron usage.
-* Remote admin and student requests require `AUTH_MODE=panbagnat`.
-* Watchdog forwards the incoming session/auth headers to Panbagnat and trusts its `/api/v1/users/me` response.
-* Panbagnat determines whether a user is admin or not.
-* Access to admin routes is granted only to Panbagnat admins/staff. If `AUTH_ADMIN_ROLES` is set, those role ids/names are accepted as admins too.
+* `AUTH_MODE=local` makes Watchdog trust the local `auth` service from this compose stack at `AUTH_SERVICE_URL`, using the same `/internal/auth/user` and `/internal/auth/admin` checks as the reference example.
+* `AUTH_MODE=panbagnat` makes Watchdog trust Pan Bagnat directly through `/api/v1/users/me`.
+* The login page always uses the same `/auth/42/login` entrypoint. In `local` mode it proxies to the local auth service. In `panbagnat` mode it redirects to Pan Bagnat.
+* Local auth mode also needs the auth service settings in `backend/.env`: `HOST_NAME`, `POSTGRES_*`, `FT_CLIENT_ID`, `FT_CLIENT_SECRET`, `FT_CALLBACK_URL`, and `ADMIN_LOGINS`.
+* For plain HTTP localhost development, the bundled local auth service now uses `SESSION_COOKIE_SAME_SITE=lax` so the login cookie works without HTTPS.
+* Pan Bagnat determines whether a user is admin or not.
+* Access to admin routes is granted only to admins/staff. If `AUTH_ADMIN_ROLES` is set, those role ids/names are accepted as admins too in Pan Bagnat mode.
 * The access-control webhook still uses its HMAC signature and is not authenticated through Panbagnat.
 * `WEBHOOK_SECRET` must now be set in `backend/.env`, otherwise webhook requests are rejected.
 

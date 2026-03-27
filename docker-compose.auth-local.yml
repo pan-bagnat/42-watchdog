@@ -1,0 +1,77 @@
+services:
+  auth-db:
+    container_name: auth-db
+    image: postgres:16
+    restart: on-failure
+    expose:
+      - "5432"
+    volumes:
+      - auth_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${AUTH_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB}
+    networks:
+      - watchdog-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_POSTGRES_USER} -d ${AUTH_POSTGRES_DB} -h localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  auth-migrator:
+    container_name: auth-migrator
+    image: migrate/migrate:latest
+    command: ["-path", "/auth-migrations", "-database", "${AUTH_POSTGRES_URL}", "up"]
+    volumes:
+      - ./auth/migrations:/auth-migrations:ro
+    networks:
+      - watchdog-network
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    restart: "no"
+
+  auth:
+    container_name: auth
+    build:
+      context: ./auth
+    init: true
+    expose:
+      - "8080"
+    restart: unless-stopped
+    environment:
+      HOST_NAME: ${HOST_NAME}
+      AUTH_POSTGRES_USER: ${AUTH_POSTGRES_USER}
+      AUTH_POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD}
+      AUTH_POSTGRES_HOST: ${AUTH_POSTGRES_HOST}
+      AUTH_POSTGRES_PORT: ${AUTH_POSTGRES_PORT}
+      AUTH_POSTGRES_DB: ${AUTH_POSTGRES_DB}
+      AUTH_POSTGRES_URL: ${AUTH_POSTGRES_URL}
+      FT_CLIENT_ID: ${FT_CLIENT_ID}
+      FT_CLIENT_SECRET: ${FT_CLIENT_SECRET}
+      FT_CALLBACK_URL: ${FT_CALLBACK_URL}
+      ADMIN_LOGINS: ${ADMIN_LOGINS}
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      auth-migrator:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks:
+      - watchdog-network
+
+  backend:
+    depends_on:
+      watchdog-db:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+
+volumes:
+  auth_postgres_data:

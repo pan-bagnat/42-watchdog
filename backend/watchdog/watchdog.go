@@ -188,14 +188,14 @@ func AllowEvents(isAllowed bool) {
 }
 
 func GetBadgeByLogin(login string) int {
-	if AllUsersMutex.TryLock() {
-		AllUsersMutex.Lock()
-		defer AllUsersMutex.Unlock()
+	ensureRuntimeDayState()
+	user, ok, err := CurrentUserByLogin(login)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current badge for %s: %v", login, err))
+		return -1
 	}
-	for key, value := range AllUsers {
-		if value.Login42 == login {
-			return key
-		}
+	if ok {
+		return user.ControlAccessID
 	}
 	return -1
 }
@@ -270,39 +270,66 @@ func CreateNewUser(userID int, accessControlUsername string) (User, int, error) 
 	return user, -1, nil
 }
 
-func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.Time, doorName string) {
+func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.Time, doorName string, badgeDelay time.Duration) {
+	ensureRuntimeDayState()
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
+
 	var err error
 	var badge int
-	AllUsersMutex.Lock()
-	user, exist := AllUsers[userID]
+	replacedBadgeID := -1
+	dayKey := currentRuntimeDayKey()
+	user, exist, err := loadCurrentUserByControlAccessID(dayKey, userID)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] ❌ Failed to load current user %d: %s", userID, err.Error()))
+		return
+	}
 	if !exist {
 		user, badge, err = CreateNewUser(userID, accessControlUsername)
 		if err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] ❌ Failed to create user: %s\n", err.Error()))
-			AllUsersMutex.Unlock()
 			return
 		}
 		if badge != -1 {
 			Log(fmt.Sprintf("[WATCHDOG] ⚠️  User %s is already registered with another badge\n", user.Login42))
+			existingUser, ok, loadErr := loadCurrentUserByControlAccessID(dayKey, badge)
+			if loadErr != nil {
+				Log(fmt.Sprintf("[WATCHDOG] ❌ Failed to load duplicated badge %d: %s", badge, loadErr.Error()))
+				return
+			}
+			if !ok {
+				Log(fmt.Sprintf("[WATCHDOG] ⚠️  User %s points to badge %d but no current row exists", user.Login42, badge))
+				return
+			}
 			if user.Profile == Student { // Badge that scanned is a student account. We need to replace the temporary badge with this one
 				Log("[WATCHDOG] ⚠️  Stored badge is a temporary badge. Replacing with student badge\n")
-				// Retrieve the user associated with the badge
-				existingUser := AllUsers[badge]
 				existingUser.Profile = Student
 				existingUser.ControlAccessID = userID
 				existingUser.ControlAccessName = accessControlUsername
-
-				// Replace the temporary badge with the official badge
-				AllUsers[userID] = existingUser // Assign the updated user to the new badge
-				delete(AllUsers, badge)         // Remove the temporary badge entry
+				replacedBadgeID = badge
+				user = existingUser
 			} else {
 				Log("[WATCHDOG] ⚠️  Used badge is a temporary badge. Logging User access on the real badge\n")
-				user = AllUsers[badge]
+				user = existingUser
 				userID = badge
 			}
 		}
 	}
-	AllUsersMutex.Unlock()
+
+	if err := saveDayProfile(dayKey, user); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist day profile for %s: %v", user.Login42, err))
+	}
+	if replacedBadgeID != -1 {
+		if err := saveCurrentUser(dayKey, user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist replaced badge %s: %v", user.Login42, err))
+		}
+		if err := deleteCurrentUser(dayKey, replacedBadgeID); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not remove replaced badge %d from storage: %v", replacedBadgeID, err))
+		}
+	}
+
+	RecordDailyBadgeEvent(user.Login42, timeStamp, doorName)
+	NotifyBadgeUpdate(user.Login42, timeStamp, doorName, badgeDelay)
 
 	isInWatchtime := getTimePeriodForTimeStamp(timeStamp)
 	if isInWatchtime != currentTimePeriod {
@@ -312,7 +339,7 @@ func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.T
 			Log("[WATCHDOG] 🕓 Watchtime changed: Watchdog went to sleep")
 		}
 		if currentTimePeriod != nil {
-			PostApprenticesAttendances()
+			postApprenticesAttendancesLocked()
 		}
 		currentTimePeriod = isInWatchtime
 	}
@@ -336,17 +363,21 @@ func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.T
 		user.LastAccess = timeStamp
 		user.Duration = user.LastAccess.Sub(user.FirstAccess)
 	}
-	AllUsersMutex.Lock()
-	AllUsers[userID] = user
-	AllUsersMutex.Unlock()
+	if err := saveCurrentUser(dayKey, user); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist current user %s: %v", user.Login42, err))
+	}
 }
 
 func PrintUsersTimers() {
+	ensureRuntimeDayState()
 	parisLoc, _ := time.LoadLocation("Europe/Paris")
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
+	users, err := CurrentUsers()
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current users: %v", err))
+		return
+	}
 
-	if len(AllUsers) == 0 {
+	if len(users) == 0 {
 		Log("[WATCHDOG] No users saved")
 		return
 	}
@@ -360,7 +391,7 @@ func PrintUsersTimers() {
 		aBadge    []User // apprentices with badge
 	)
 
-	for _, user := range AllUsers {
+	for _, user := range users {
 		switch {
 		case !user.IsApprentice && user.FirstAccess.IsZero():
 			naNoBadge = append(naNoBadge, user)
@@ -450,6 +481,70 @@ func getCampusID() int {
 	return campusID
 }
 
+func buildAttendancePayload(user User) (APIAttendance, error) {
+	id42, err := strconv.Atoi(strings.TrimSpace(user.ID42))
+	if err != nil {
+		return APIAttendance{}, fmt.Errorf("invalid 42 user id %q", user.ID42)
+	}
+	return APIAttendance{
+		Begin_at:  user.FirstAccess.UTC().Format(time.RFC3339),
+		End_at:    user.LastAccess.UTC().Format(time.RFC3339),
+		Source:    "access-control",
+		Campus_id: getCampusID(),
+		User_id:   id42,
+	}, nil
+}
+
+func postAttendanceForUser(user *User) {
+	payload, err := buildAttendancePayload(*user)
+	if err != nil {
+		user.Status = POST_ERROR
+		user.Error = err
+		return
+	}
+
+	dayKey := dayKeyInParis(user.FirstAccess)
+	if dayKey == "" {
+		dayKey = currentRuntimeDayKey()
+	}
+
+	if !config.ConfigData.Attendance42.AutoPost {
+		user.Status = POST_OFF
+		user.Error = fmt.Errorf("AUTOPOST is off")
+		if err := recordAttendancePost(dayKey, *user, payload, nil, "", user.Error.Error(), false); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
+		}
+		return
+	}
+
+	resp, err := apiManager.GetClient(config.FTAttendance).Post("/attendances", payload)
+	if err != nil {
+		user.Status = POST_ERROR
+		user.Error = err
+		if persistErr := recordAttendancePost(dayKey, *user, payload, nil, "", user.Error.Error(), false); persistErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, persistErr))
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	statusCode := resp.StatusCode
+	if resp.StatusCode != http.StatusOK {
+		user.Status = POST_ERROR
+		user.Error = fmt.Errorf("%s", resp.Status)
+		if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, user.Error.Error(), false); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
+		}
+		return
+	}
+
+	user.Status = POSTED
+	user.Error = nil
+	if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, "", true); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
+	}
+}
+
 func formatPostInfo(user User, loc *time.Location, msg string) string {
 	first := "00:00:00"
 	last := "00:00:00"
@@ -478,7 +573,9 @@ func resetUserDuration(user User) {
 	user.FirstAccess = time.Time{}
 	user.LastAccess = time.Time{}
 	user.Duration = 0
-	AllUsers[user.ControlAccessID] = user
+	if err := saveCurrentUser(currentRuntimeDayKey(), user); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not reset persisted duration for %s: %v", user.Login42, err))
+	}
 }
 
 func SinglePostApprentice(user User) {
@@ -496,8 +593,6 @@ func SinglePostApprentice(user User) {
 		return
 	}
 
-	id42, _ := strconv.ParseInt(user.ID42, 10, 64)
-
 	if user.FirstAccess.Equal(user.LastAccess) {
 		if user.IsApprentice {
 			user.Status = APPRENTICE_BADGED_ONCE
@@ -512,47 +607,25 @@ func SinglePostApprentice(user User) {
 		return
 	}
 
-	if !config.ConfigData.Attendance42.AutoPost {
-		user.Status = POST_ERROR
-		user.Error = fmt.Errorf("AUTOPOST is off")
-		return
-	}
-
-	resp, err := apiManager.GetClient(config.FTAttendance).Post("/attendances", APIAttendance{
-		Begin_at:  user.FirstAccess.UTC().Format(time.RFC3339),
-		End_at:    user.LastAccess.UTC().Format(time.RFC3339),
-		Source:    "access-control",
-		Campus_id: getCampusID(),
-		User_id:   int(id42),
-	})
-
-	if err != nil {
-		user.Status = POST_ERROR
-		user.Error = err
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		user.Status = POST_ERROR
-		user.Error = fmt.Errorf("%s", resp.Status)
-		return
-	}
-
-	user.Status = POSTED
-	user.Error = nil
+	postAttendanceForUser(&user)
 }
 
-func PostApprenticesAttendances() {
+func postApprenticesAttendancesLocked() {
+	ensureRuntimeDayState()
 	parisLoc, _ := time.LoadLocation("Europe/Paris")
 	sortedUser := map[string][]User{}
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
-	total := len(AllUsers)
+	processedUsers := []User{}
+	users, err := CurrentUsers()
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current users before posting: %v", err))
+		return
+	}
+	total := len(users)
 	if total == 0 {
 		Log("[WATCHDOG] [POST] Posting Attendances: no users registered")
 		return
 	}
-	for _, user := range AllUsers {
+	for _, user := range users {
 		if user.FirstAccess.IsZero() {
 			if user.IsApprentice {
 				user.Status = APPRENTICE_NO_BADGE
@@ -560,11 +633,10 @@ func PostApprenticesAttendances() {
 				user.Status = NO_BADGE
 			}
 			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
 		}
-
-		id42, _ := strconv.ParseInt(user.ID42, 10, 64)
 
 		if user.FirstAccess.Equal(user.LastAccess) {
 			if user.IsApprentice {
@@ -573,6 +645,7 @@ func PostApprenticesAttendances() {
 				user.Status = BADGED_ONCE
 			}
 			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
 		}
@@ -580,44 +653,13 @@ func PostApprenticesAttendances() {
 		if !user.IsApprentice {
 			user.Status = NOT_APPRENTICE
 			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
 		}
-
-		if !config.ConfigData.Attendance42.AutoPost {
-			user.Status = POST_OFF
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
-			resetUserDuration(user)
-			continue
-		}
-
-		resp, err := apiManager.GetClient(config.FTAttendance).Post("/attendances", APIAttendance{
-			Begin_at:  user.FirstAccess.UTC().Format(time.RFC3339),
-			End_at:    user.LastAccess.UTC().Format(time.RFC3339),
-			Source:    "access-control",
-			Campus_id: getCampusID(),
-			User_id:   int(id42),
-		})
-
-		if err != nil {
-			user.Status = POST_ERROR
-			user.Error = err
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
-			resetUserDuration(user)
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			user.Status = POST_ERROR
-			user.Error = fmt.Errorf("%s", resp.Status)
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
-			resetUserDuration(user)
-			continue
-		}
-
-		user.Status = POSTED
-		user.Error = nil
+		postAttendanceForUser(&user)
 		sortedUser[user.Status] = append(sortedUser[user.Status], user)
+		processedUsers = append(processedUsers, user)
 		resetUserDuration(user)
 	}
 
@@ -626,6 +668,10 @@ func PostApprenticesAttendances() {
 			return users[i].Login42 < users[j].Login42 // or .Login42, etc.
 		})
 		sortedUser[status] = users // update the map with the sorted slice
+	}
+
+	if err := finalizeDayWithOverrides(currentRuntimeDayKey(), processedUsers); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not finalize daily history: %v", err))
 	}
 
 	// LOG NON APPRENTICE USERS:
@@ -712,11 +758,13 @@ func PostApprenticesAttendances() {
 	if atLeastOneField {
 		mailer.Send(mailer.GetRecipients(), fmt.Sprintf("Watchdog – Daily Report - %s", time.Now().Format("02/01/2006")), htmlBody.String(), true)
 	}
+}
 
-	for key, user := range AllUsers {
-		user.Error = nil
-		AllUsers[key] = user
-	}
+func PostApprenticesAttendances() {
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
+
+	postApprenticesAttendancesLocked()
 }
 
 func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
@@ -776,82 +824,93 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 }
 
 func DeleteAllPisciners() {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
+	ensureRuntimeDayState()
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
 
-	for id, user := range AllUsers {
+	users, err := CurrentUsers()
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current users: %v", err))
+		return
+	}
+
+	for _, user := range users {
 		if user.Profile == Pisciner {
-			delete(AllUsers, id)
+			if err := deleteCurrentUser(currentRuntimeDayKey(), user.ControlAccessID); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not delete persisted pisciner %s: %v", user.Login42, err))
+			}
+			if err := deleteCurrentDayDataForLogin(currentRuntimeDayKey(), user.Login42); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not delete persisted day data for %s: %v", user.Login42, err))
+			}
 			Log(fmt.Sprintf("[WATCHDOG] 🗑️  Deleted pisciner %s from Watchdog", user.Login42))
 		}
 	}
 }
 
 func DeleteStudent(login string, withPost bool) {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
+	ensureRuntimeDayState()
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
 
-	for id, user := range AllUsers {
-		if strings.EqualFold(user.Login42, login) {
-			if withPost {
-				SinglePostApprentice(user)
-			}
-			delete(AllUsers, id)
-			if withPost {
-				Log(fmt.Sprintf("[WATCHDOG] 🗑️  Deleted user %s from Watchdog with Post", user.Login42))
-			} else {
-				Log(fmt.Sprintf("[WATCHDOG] 🗑️  Deleted user %s from Watchdog", user.Login42))
-			}
-			return
-		}
+	user, ok, err := CurrentUserByLogin(login)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load user %s before deletion: %v", login, err))
+		return
 	}
-	Log(fmt.Sprintf("[WATCHDOG] ⚠️  Could not delete user with login %s: user not found", login))
+	if !ok {
+		Log(fmt.Sprintf("[WATCHDOG] ⚠️  Could not delete user with login %s: user not found", login))
+		return
+	}
+	if withPost {
+		SinglePostApprentice(user)
+	}
+	if err := deleteCurrentUser(currentRuntimeDayKey(), user.ControlAccessID); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not delete persisted current user %s: %v", user.Login42, err))
+	}
+	DeleteDailyBadgeEvents(user.Login42)
+	DeleteDailyLocationSessions(user.Login42)
+	if withPost {
+		Log(fmt.Sprintf("[WATCHDOG] 🗑️  Deleted user %s from Watchdog with Post", user.Login42))
+	} else {
+		Log(fmt.Sprintf("[WATCHDOG] 🗑️  Deleted user %s from Watchdog", user.Login42))
+	}
 }
 
 func UpdateStudent(login string, status bool) {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
+	ensureRuntimeDayState()
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
 
-	for id, user := range AllUsers {
-		if strings.EqualFold(user.Login42, login) {
-			user.IsApprentice = status
-			AllUsers[id] = user
-			Log(fmt.Sprintf("[WATCHDOG] 🔧 Manually updated %s to apprentice=%t", user.Login42, status))
-			return
+	user, ok, err := CurrentUserByLogin(login)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load user %s before update: %v", login, err))
+		return
+	}
+	if ok {
+		user.IsApprentice = status
+		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist updated profile for %s: %v", user.Login42, err))
 		}
+		if err := saveCurrentUser(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist updated user for %s: %v", user.Login42, err))
+		}
+		Log(fmt.Sprintf("[WATCHDOG] 🔧 Manually updated %s to apprentice=%t", user.Login42, status))
+		return
 	}
 	Log(fmt.Sprintf("[WATCHDOG] ⚠️  Could not update user with login %s: user not found", login))
 }
 
 func RefetchStudent(login string) {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
+	ensureRuntimeDayState()
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
 
-	for id, user := range AllUsers {
-		if strings.EqualFold(user.Login42, login) {
-			oldStatus := user.IsApprentice
-			user.IsApprentice = false
-			for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
-				if isProjectOngoing(user.Login42, projectID) {
-					user.IsApprentice = true
-					break
-				}
-			}
-			AllUsers[id] = user
-			Log(fmt.Sprintf("[WATCHDOG] 🔄 Refetched status for %s: %t → %t", user.Login42, oldStatus, user.IsApprentice))
-			return
-		}
+	user, ok, err := CurrentUserByLogin(login)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load user %s before refetch: %v", login, err))
+		return
 	}
-
-	Log(fmt.Sprintf("[WATCHDOG] ⚠️  Could not find user with login %s to refetch status", login))
-}
-
-func RefetchAllStudents() {
-	Log("[WATCHDOG] 🔁 Refetching apprentice status for all users...")
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
-
-	for id, user := range AllUsers {
+	if ok {
 		oldStatus := user.IsApprentice
 		user.IsApprentice = false
 		for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
@@ -860,37 +919,50 @@ func RefetchAllStudents() {
 				break
 			}
 		}
-		AllUsers[id] = user
+		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched profile for %s: %v", user.Login42, err))
+		}
+		if err := saveCurrentUser(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched user for %s: %v", user.Login42, err))
+		}
+		Log(fmt.Sprintf("[WATCHDOG] 🔄 Refetched status for %s: %t → %t", user.Login42, oldStatus, user.IsApprentice))
+		return
+	}
+
+	Log(fmt.Sprintf("[WATCHDOG] ⚠️  Could not find user with login %s to refetch status", login))
+}
+
+func RefetchAllStudents() {
+	ensureRuntimeDayState()
+	Log("[WATCHDOG] 🔁 Refetching apprentice status for all users...")
+	stateMutationMutex.Lock()
+	defer stateMutationMutex.Unlock()
+
+	users, err := CurrentUsers()
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current users before refetch: %v", err))
+		return
+	}
+
+	for _, user := range users {
+		oldStatus := user.IsApprentice
+		user.IsApprentice = false
+		for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
+			if isProjectOngoing(user.Login42, projectID) {
+				user.IsApprentice = true
+				break
+			}
+		}
+		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched profile for %s: %v", user.Login42, err))
+		}
+		if err := saveCurrentUser(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched user for %s: %v", user.Login42, err))
+		}
 		if oldStatus != user.IsApprentice {
 			Log(fmt.Sprintf("[WATCHDOG] 🔄 Updated %s: %t → %t", user.Login42, oldStatus, user.IsApprentice))
 		}
 	}
 
 	Log("[WATCHDOG] ✅ All users' apprentice statuses have been refreshed")
-}
-
-func FindUserByLogin(login string) (User, bool) {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
-
-	for _, user := range AllUsers {
-		if strings.EqualFold(user.Login42, login) {
-			return user, true
-		}
-	}
-	return User{}, false
-}
-
-func SnapshotUsers() []User {
-	AllUsersMutex.Lock()
-	defer AllUsersMutex.Unlock()
-
-	users := make([]User, 0, len(AllUsers))
-	for _, user := range AllUsers {
-		users = append(users, user)
-	}
-	sort.Slice(users, func(i, j int) bool {
-		return strings.ToLower(users[i].Login42) < strings.ToLower(users[j].Login42)
-	})
-	return users
 }

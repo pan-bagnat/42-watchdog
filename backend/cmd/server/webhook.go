@@ -229,7 +229,9 @@ func accessControlEndpoint(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "Webhook couldn't parse event time")
 	}
-	go watchdog.UpdateUserAccess(*payload.Data.User, payload.Data.Event.UserName, eventTime, payload.Data.Event.DoorName)
+	receivedAt := time.Now()
+	delayState := watchdog.UpdateBadgeDelay(eventTime, receivedAt)
+	go watchdog.UpdateUserAccess(*payload.Data.User, payload.Data.Event.UserName, eventTime, payload.Data.Event.DoorName, delayState.Delay)
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, "Webhook received and queued to process")
 }

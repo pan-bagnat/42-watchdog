@@ -10,10 +10,6 @@ import (
 	apiManager "github.com/TheKrainBow/go-api"
 )
 
-func init() {
-	AllUsers = make(map[int]User)
-}
-
 func initAccessControlAPI() error {
 	APIClient, err := apiManager.NewAPIClient(config.AccessControl, apiManager.APIClientInput{
 		AuthType: apiManager.AuthTypeBasic,

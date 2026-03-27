@@ -69,11 +69,16 @@ type ConfigMailer struct {
 	Recipients []string `yaml:"recipients"`
 }
 
+type ConfigStorage struct {
+	DatabaseURL string `yaml:"databaseUrl"`
+}
+
 type ConfigFile struct {
 	AccessControl ConfigAccessControl `yaml:"AccessControl"`
 	ApiV2         ConfigAPIV2         `yaml:"42apiV2"`
 	Attendance42  ConfigAttendance42  `yaml:"42Attendance"`
 	Mailer        ConfigMailer        `yaml:"mailer"`
+	Storage       ConfigStorage       `yaml:"storage"`
 	Watchtime     ConfigWatchtime     `yaml:"watchtime"`
 }
 
@@ -181,6 +186,7 @@ func applyEnvOverrides() error {
 	ConfigData.Mailer.FromName = getEnv("MAILER_FROM_NAME", ConfigData.Mailer.FromName)
 	ConfigData.Mailer.FromMail = getEnv("MAILER_FROM_MAIL", ConfigData.Mailer.FromMail)
 	ConfigData.Mailer.Recipients = getEnvList("MAILER_RECIPIENTS", ConfigData.Mailer.Recipients)
+	ConfigData.Storage.DatabaseURL = getEnv("WATCHDOG_POSTGRES_URL", ConfigData.Storage.DatabaseURL)
 
 	return nil
 }

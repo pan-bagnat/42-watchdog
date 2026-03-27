@@ -1,24 +1,66 @@
 services:
+  watchdog-db:
+    container_name: watchdog-db
+    image: postgres:16
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: ${WATCHDOG_POSTGRES_USER:-watchdog}
+      POSTGRES_PASSWORD: ${WATCHDOG_POSTGRES_PASSWORD:-watchdog}
+      POSTGRES_DB: ${WATCHDOG_POSTGRES_DB:-watchdog}
+    volumes:
+      - watchdog_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WATCHDOG_POSTGRES_USER:-watchdog} -d ${WATCHDOG_POSTGRES_DB:-watchdog} -h localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - watchdog-network
+
+  adminer:
+    container_name: watchdog-adminer
+    image: adminer:4
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: watchdog-db
+      ADMINER_DESIGN: pepa-linha
+    depends_on:
+      watchdog-db:
+        condition: service_healthy
+    networks:
+      - watchdog-network
+
   backend:
+    container_name: backend
     build:
       context: ./backend
       dockerfile: Dockerfile
     env_file:
-      - ./backend/.env
+      - .env
     volumes:
       - ./backend/config.yml:/app/config.yml:ro
       - backend_logs:/var/log/watchdog
     restart: unless-stopped
     expose:
       - "8042"
+    depends_on:
+      watchdog-db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8042/healthz >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - watchdog-network
 
   frontend:
+    container_name: frontend
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -31,8 +73,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - watchdog-network
 
   nginx:
+    container_name: nginx
     build:
       context: ./nginx
       dockerfile: Dockerfile
@@ -44,6 +89,14 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
+    networks:
+      - watchdog-network
 
 volumes:
   backend_logs:
+  watchdog_postgres_data:
+
+networks:
+  watchdog-network:
+    name: watchdog-network

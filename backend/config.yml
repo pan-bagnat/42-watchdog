@@ -1,3 +1,6 @@
+storage:
+    databaseUrl: postgres://watchdog:watchdog@watchdog-db:5432/watchdog?sslmode=disable
+
 watchtime:
     monday:     [["07:30:00", "20:30:00"]]
     tuesday:    [["07:30:00", "20:30:00"]]
