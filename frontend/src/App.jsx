@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const TIMELINE_START_MINUTES = 7 * 60 + 30;
 const TIMELINE_END_MINUTES = 20 * 60 + 30;
@@ -16,6 +16,13 @@ const TIMELINE_HOURS = Array.from({ length: 13 }, (_, index) => {
     minutes: hour * 60
   };
 });
+const MANAGED_STATUS_OPTIONS = [
+  { value: "apprentice", label: "Alternant", emoji: "👨‍🎓" },
+  { value: "student", label: "Étudiant", emoji: "🐣" },
+  { value: "pisciner", label: "Piscineux", emoji: "🏊‍♂️" },
+  { value: "staff", label: "Staff", emoji: "🛠️" },
+  { value: "extern", label: "Externe", emoji: "🌍" }
+];
 
 function formatDuration(seconds, fallback) {
   if (typeof seconds !== "number" || Number.isNaN(seconds)) {
@@ -33,6 +40,10 @@ function formatDuration(seconds, fallback) {
   }
   parts.push(`${secs}s`);
   return parts.join(" ");
+}
+
+function formatCompactDuration(seconds, fallback) {
+  return formatDuration(seconds, fallback).replace(/\s+/g, "");
 }
 
 function getBadgeDelayVariant(seconds) {
@@ -132,9 +143,43 @@ function formatStatusLabel(status) {
       return "Alternant";
     case "pisciner":
       return "Piscineux";
+    case "staff":
+      return "Staff";
+    case "extern":
+      return "Externe";
     default:
-      return "Etudiant";
+      return "Étudiant";
   }
+}
+
+function getDetectedStatus(user) {
+  const raw = String(user?.status_42 || "").trim().toLowerCase();
+  return raw || "student";
+}
+
+function getEffectiveStatus(user) {
+  const raw = String(user?.status || "").trim().toLowerCase();
+  return raw || getDetectedStatus(user);
+}
+
+function getStatusOption(status) {
+  return MANAGED_STATUS_OPTIONS.find((option) => option.value === status) || MANAGED_STATUS_OPTIONS[1];
+}
+
+function getUserFlags(user) {
+  return {
+    isBlacklisted: Boolean(user?.is_blacklisted),
+    blacklistReason: String(user?.blacklist_reason || "").trim()
+  };
+}
+
+function getUserStateBadges(user) {
+  const flags = getUserFlags(user);
+  const badges = [];
+  if (flags.isBlacklisted) {
+    badges.push({ key: "blacklisted", label: "BLACKLISTED", tone: "danger" });
+  }
+  return badges;
 }
 
 function formatLastBadgeAt(value) {
@@ -151,6 +196,59 @@ function formatLastBadgeAt(value) {
   }).format(date);
 }
 
+function getReportLineMessage(user) {
+  const status = String(user?.post_result || "").trim();
+  const errorMessage = String(user?.error_message || "").trim();
+
+  if (status === "Skipped because user is blacklisted") {
+    return "Apprentice is blacklisted";
+  }
+  if (errorMessage !== "") {
+    return errorMessage;
+  }
+  return status || "Post not attempted";
+}
+
+function isReportLineSuccess(user) {
+  const status = String(user?.post_result || "").trim();
+  return status === "Posted" || status === "AUTOPOST is off";
+}
+
+function getReportLineTimes(user) {
+  const first = user?.first_access ? formatClockTime(user.first_access, true) : "00:00:00";
+  const last = user?.last_access ? formatClockTime(user.last_access, true) : "00:00:00";
+  return { first, last };
+}
+
+function sortReportUsers(users) {
+  const apprentices = [...users].filter((user) => Boolean(user?.is_apprentice));
+  const compareLogin = (left, right) => String(left?.login_42 || "").localeCompare(String(right?.login_42 || ""));
+  const successes = apprentices.filter(isReportLineSuccess).sort(compareLogin);
+  const failures = apprentices.filter((user) => !isReportLineSuccess(user)).sort(compareLogin);
+  return { successes, failures };
+}
+
+function padCenter(value, width) {
+  const text = String(value || "");
+  if (text.length >= width) {
+    return text;
+  }
+  const total = width - text.length;
+  const left = Math.floor(total / 2);
+  const right = total - left;
+  return `${" ".repeat(left)}${text}${" ".repeat(right)}`;
+}
+
+function buildReportLine(user) {
+  const success = isReportLineSuccess(user);
+  const message = getReportLineMessage(user);
+  const { first, last } = getReportLineTimes(user);
+  const emoji = success ? "✅" : "❌";
+  const login = String(user?.login_42 || "").padEnd(8, " ");
+  const duration = padCenter(`(${formatCompactDuration(user?.duration_seconds, user?.duration_human)})`, 10);
+  return `${emoji} ${login}: ${first}-${last}  ${duration}  — ${message}`;
+}
+
 function readAdminUserFiltersFromURL() {
   const query = new URLSearchParams(window.location.search);
   const statuses = new Set(query.getAll("status").map((value) => value.trim().toLowerCase()).filter(Boolean));
@@ -162,12 +260,16 @@ function readAdminUserFiltersFromURL() {
         ? {
             apprentice: statuses.has("apprentice"),
             student: statuses.has("student"),
-            pisciner: statuses.has("pisciner")
+            pisciner: statuses.has("pisciner"),
+            staff: statuses.has("staff"),
+            extern: statuses.has("extern")
           }
         : {
             apprentice: true,
             student: false,
-            pisciner: false
+            pisciner: false,
+            staff: false,
+            extern: false
           }
   };
 }
@@ -342,6 +444,166 @@ function BadgeDelayChip({ seconds }) {
     <div className={`badge-delay-chip badge-delay-chip-${variant}`}>
       <strong>Delai badgeuse</strong>
       <span>{label}</span>
+    </div>
+  );
+}
+
+function UserAvatar({ user, className = "user-avatar" }) {
+  const flags = getUserFlags(user);
+  const avatarClassName = [className, flags.isBlacklisted ? "user-avatar-blacklisted" : ""].filter(Boolean).join(" ");
+
+  return (
+    <div className="user-avatar-shell">
+      {user.photo_url ? (
+        <img className={avatarClassName} src={user.photo_url} alt="" />
+      ) : (
+        <div className={`${avatarClassName} user-avatar-fallback`} aria-hidden>
+          {String(user.login_42 || "").slice(0, 2).toUpperCase()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UserStateBadges({ user }) {
+  const badges = getUserStateBadges(user);
+  if (badges.length === 0) {
+    return null;
+  }
+  return (
+    <span className="user-state-badges">
+      {badges.map((badge) => (
+        <span key={badge.key} className={`user-state-badge user-state-badge-${badge.tone}`}>
+          {badge.label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function AdminStatusField({ value, detectedValue, disabled, onChange }) {
+  const [open, setOpen] = useState(false);
+  const selectedOption =
+    MANAGED_STATUS_OPTIONS.find((option) => option.value === value) || MANAGED_STATUS_OPTIONS[0];
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
+
+  return (
+    <div className="admin-status-field">
+      <button
+        className={`admin-status-trigger${open ? " admin-status-trigger-open" : ""}`}
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="admin-status-trigger-value">
+          <span aria-hidden>{selectedOption.emoji}</span>
+          <span>{selectedOption.label}</span>
+        </span>
+        <span className="admin-status-trigger-chevron" aria-hidden>
+          ▾
+        </span>
+      </button>
+      {open ? (
+        <div className="admin-status-menu" role="listbox" aria-label="Statut">
+          {MANAGED_STATUS_OPTIONS.map((option) => {
+            const isDetected = option.value === detectedValue;
+            const isSelected = option.value === value;
+            return (
+              <button
+                key={option.value}
+                className={`admin-status-option${isSelected ? " admin-status-option-selected" : ""}`}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  onChange(option.value);
+                }}
+              >
+                <span className="admin-status-option-main">
+                  <span aria-hidden>{option.emoji}</span>
+                  <span>{option.label}</span>
+                </span>
+                {isDetected ? <span className="admin-status-option-detected">42</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function BlacklistActionButton({ blacklisted, disabled, onClick }) {
+  return (
+    <button
+      className={`blacklist-action-button${blacklisted ? " blacklist-action-button-forgive" : ""}`}
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span className="blacklist-action-button__text">{blacklisted ? "Pardonner?" : "Blacklister"}</span>
+      <span className="blacklist-action-button__icon" aria-hidden>
+        <svg className="blacklist-action-button__svg" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+          <circle
+            cx="256"
+            cy="256"
+            r="176"
+            style={{ fill: "none", stroke: "#fff", strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 32 }}
+          />
+          <path
+            d="M145 367L367 145"
+            style={{ fill: "none", stroke: "#fff", strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 32 }}
+          />
+        </svg>
+      </span>
+    </button>
+  );
+}
+
+function ConfirmationModal({
+  open,
+  title,
+  children,
+  confirmLabel,
+  cancelLabel = "Annuler",
+  tone = "danger",
+  confirmDisabled = false,
+  onConfirm,
+  onClose
+}) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h2>{title}</h2>
+        <div className="modal-copy">{children}</div>
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            {cancelLabel}
+          </button>
+          <button
+            className={tone === "danger" ? "danger-button" : "primary-button"}
+            type="button"
+            disabled={confirmDisabled}
+            onClick={onConfirm}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -568,9 +830,9 @@ function Header({ user, badgeDelaySeconds, onLogout, subtitle, viewMode, onToggl
   const isAdmin = user.is_staff || user.ft_is_staff;
   const roleLabel = isAdmin
     ? viewMode === "student"
-      ? "Admin connecte · Vue etudiant"
+      ? "Admin connecte · Vue étudiant"
       : "Admin"
-    : "Etudiant";
+    : "Étudiant";
 
   return (
     <header className="topbar">
@@ -586,12 +848,104 @@ function Header({ user, badgeDelaySeconds, onLogout, subtitle, viewMode, onToggl
         </div>
         {isAdmin && typeof onToggleView === "function" ? (
           <button className="secondary-button" type="button" onClick={onToggleView}>
-            {viewMode === "student" ? "Retour admin" : "Vue etudiant"}
+            {viewMode === "student" ? "Retour admin" : "Vue étudiant"}
           </button>
         ) : null}
         <button className="secondary-button" type="button" onClick={onLogout}>
           Deconnexion
         </button>
+      </div>
+    </header>
+  );
+}
+
+function AdminHeader({ user, badgeDelaySeconds, onLogout, onToggleView, activeSection, onNavigate }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  const sections = [
+    { key: "students", label: "Étudiants", href: "/" },
+    { key: "reports", label: "Rapports", href: "/reports" }
+  ];
+
+  useEffect(() => {
+    function handlePointerDown(event) {
+      if (!menuRef.current || menuRef.current.contains(event.target)) {
+        return;
+      }
+      setMenuOpen(false);
+    }
+
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        setMenuOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
+
+  return (
+    <header className="admin-header">
+      <div className="admin-header-bar">
+        <div className="admin-header-brand">
+          <span className="admin-header-kicker">Espace administration</span>
+          <nav className="admin-section-nav" aria-label="Navigation administration">
+            {sections.map((section) => (
+              <button
+                key={section.key}
+                type="button"
+                className={`admin-section-tab${activeSection === section.key ? " admin-section-tab-active" : ""}`}
+                onClick={() => onNavigate(section.href)}
+              >
+                {section.label}
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div className="admin-header-actions">
+          <BadgeDelayChip seconds={badgeDelaySeconds} />
+          <div className="admin-header-profile" ref={menuRef}>
+            <button
+              type="button"
+              className={`admin-profile-button${menuOpen ? " admin-profile-button-open" : ""}`}
+              onClick={() => setMenuOpen((current) => !current)}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+            >
+              <UserAvatar user={{ login_42: user.ft_login, photo_url: user.ft_photo }} className="user-avatar admin-profile-avatar" />
+              <span className="admin-profile-login">{user.ft_login}</span>
+            </button>
+            {menuOpen ? (
+              <div className="admin-profile-menu" role="menu">
+                <button
+                  type="button"
+                  className="admin-profile-menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onToggleView();
+                  }}
+                >
+                  Vue étudiant
+                </button>
+                <button
+                  type="button"
+                  className="admin-profile-menu-item admin-profile-menu-item-danger"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onLogout();
+                  }}
+                >
+                  Déconnexion
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </div>
       </div>
     </header>
   );
@@ -767,25 +1121,27 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
 
   const statusTiles = [
     { key: "apprentice", label: "Alternant", emoji: "👨‍🎓" },
-    { key: "student", label: "Etudiant", emoji: "👶" },
-    { key: "pisciner", label: "Piscineux", emoji: "🏊‍♂️" }
+    { key: "student", label: "Étudiant", emoji: "👶" },
+    { key: "pisciner", label: "Piscineux", emoji: "🏊‍♂️" },
+    { key: "staff", label: "Staff", emoji: "🛠️" },
+    { key: "extern", label: "Externe", emoji: "🌍" }
   ];
 
   return (
     <main className="app-shell">
-      <Header
+      <AdminHeader
         user={user}
         badgeDelaySeconds={badgeDelaySeconds}
         onLogout={onLogout}
-        subtitle="Tableau de bord admin"
-        viewMode="admin"
         onToggleView={onToggleView}
+        activeSection="students"
+        onNavigate={onNavigate}
       />
 
       <section className="panel">
         <div className="panel-header">
           <div>
-            <h2>Etudiants suivis</h2>
+            <h2>Étudiants suivis</h2>
             <p className="panel-subtitle">Liste globale, independante des jours, avec dernier passage connu.</p>
           </div>
         </div>
@@ -841,23 +1197,218 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
                 type="button"
                 onClick={() => onNavigate(`/admin/${encodeURIComponent(currentUser.login_42)}`)}
               >
-                {currentUser.photo_url ? (
-                  <img className="user-avatar" src={currentUser.photo_url} alt="" />
-                ) : (
-                  <div className="user-avatar user-avatar-fallback" aria-hidden>
-                    {currentUser.login_42.slice(0, 2).toUpperCase()}
-                  </div>
-                )}
+                <UserAvatar user={currentUser} />
                 <div className="user-list-main">
-                  <strong>{currentUser.login_42}</strong>
-                  <span>{formatStatusLabel(currentUser.status)}</span>
+                  <strong>
+                    {currentUser.login_42} <UserStateBadges user={currentUser} />
+                  </strong>
+                  <span>{formatStatusLabel(getEffectiveStatus(currentUser))}</span>
                 </div>
                 <div className="user-list-side">
                   <span>Last badge</span>
                   <strong>{formatLastBadgeAt(currentUser.last_badge_at)}</strong>
+                  {currentUser.last_badge_at ? (
+                    <span>
+                      Durée journée:{" "}
+                      {formatDuration(
+                        currentUser.last_badge_day_duration_seconds,
+                        currentUser.last_badge_day_duration_human
+                      )}
+                    </span>
+                  ) : null}
                 </div>
               </button>
             ))}
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNavigate }) {
+  const [reportsState, setReportsState] = useState({ loading: true, error: "", items: [] });
+  const [expandedDays, setExpandedDays] = useState(() => new Set());
+  const [detailsByDay, setDetailsByDay] = useState({});
+
+  async function loadReports() {
+    setReportsState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      const { response, json, text } = await requestJSON("/api/admin/reports");
+      if (!response.ok) {
+        throw new Error((json && json.message) || text || "Unable to load daily reports.");
+      }
+      setReportsState({
+        loading: false,
+        error: "",
+        items: Array.isArray(json) ? json : []
+      });
+    } catch (loadError) {
+      setReportsState({
+        loading: false,
+        error: loadError instanceof Error ? loadError.message : String(loadError),
+        items: []
+      });
+    }
+  }
+
+  async function loadReportDay(dayKey) {
+    setDetailsByDay((current) => ({
+      ...current,
+      [dayKey]: {
+        loading: true,
+        error: "",
+        items: current[dayKey]?.items || []
+      }
+    }));
+
+    try {
+      const { response, json, text } = await requestJSON(
+        `/api/admin/students?date=${encodeURIComponent(dayKey)}&apprentices_only=true`
+      );
+      if (!response.ok) {
+        throw new Error((json && json.message) || text || "Unable to load this report day.");
+      }
+      const items = Array.isArray(json) ? json : [];
+      setDetailsByDay((current) => ({
+        ...current,
+        [dayKey]: {
+          loading: false,
+          error: "",
+          items
+        }
+      }));
+    } catch (loadError) {
+      setDetailsByDay((current) => ({
+        ...current,
+        [dayKey]: {
+          loading: false,
+          error: loadError instanceof Error ? loadError.message : String(loadError),
+          items: current[dayKey]?.items || []
+        }
+      }));
+    }
+  }
+
+  useEffect(() => {
+    void loadReports();
+  }, []);
+
+  function toggleDay(dayKey) {
+    setExpandedDays((current) => {
+      const next = new Set(current);
+      if (next.has(dayKey)) {
+        next.delete(dayKey);
+        return next;
+      }
+      next.add(dayKey);
+      return next;
+    });
+
+    if (!detailsByDay[dayKey]) {
+      void loadReportDay(dayKey);
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <AdminHeader
+        user={user}
+        badgeDelaySeconds={badgeDelaySeconds}
+        onLogout={onLogout}
+        onToggleView={onToggleView}
+        activeSection="reports"
+        onNavigate={onNavigate}
+      />
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Rapports journaliers</h2>
+            <p className="panel-subtitle">
+              Un jour par item. Ouvrez une ligne pour retrouver le détail équivalent au mail de résumé.
+            </p>
+          </div>
+        </div>
+        {reportsState.loading ? (
+          <p className="feedback">Chargement des rapports...</p>
+        ) : reportsState.error ? (
+          <p className="feedback feedback-error">{reportsState.error}</p>
+        ) : reportsState.items.length === 0 ? (
+          <p className="feedback">Aucun rapport journalier disponible.</p>
+        ) : (
+          <div className="report-day-list">
+            {reportsState.items.map((report) => {
+              const isExpanded = expandedDays.has(report.day);
+              const detailState = detailsByDay[report.day];
+
+              return (
+                <section key={report.day} className={`report-day-card${isExpanded ? " report-day-card-open" : ""}`}>
+                  <button
+                    type="button"
+                    className="report-day-toggle"
+                    onClick={() => toggleDay(report.day)}
+                    aria-expanded={isExpanded}
+                  >
+                    <div className="report-day-main">
+                      <strong>{formatLongDayLabel(report.day)}</strong>
+                      <span>{report.day}</span>
+                    </div>
+                    <div className="report-day-stats">
+                      <span>{report.student_count} alternants</span>
+                      <span>{report.posted_count} posts</span>
+                      {report.failed_count > 0 ? <span className="report-stat-danger">{report.failed_count} échecs</span> : null}
+                    </div>
+                    <span className={`report-day-chevron${isExpanded ? " report-day-chevron-open" : ""}`} aria-hidden>
+                      ▾
+                    </span>
+                  </button>
+
+                  {isExpanded ? (
+                    <div className="report-day-body">
+                      {detailState?.loading ? (
+                        <p className="feedback">Chargement du détail...</p>
+                      ) : detailState?.error ? (
+                        <p className="feedback feedback-error">{detailState.error}</p>
+                      ) : detailState?.items?.length ? (
+                        (() => {
+                          const { successes, failures } = sortReportUsers(detailState.items);
+                          const orderedStudents = [...successes, ...(successes.length > 0 && failures.length > 0 ? [{ __separator: true }] : []), ...failures];
+
+                          return (
+                            <div className="report-mail">
+                              {orderedStudents.length === 0 ? (
+                                <p className="feedback">Aucun alternant pour cette journée.</p>
+                              ) : (
+                                orderedStudents.map((student, index) => {
+                                  if (student.__separator) {
+                                    return <div key={`${report.day}-separator-${index}`} className="report-line-gap" aria-hidden />;
+                                  }
+
+                                  const success = isReportLineSuccess(student);
+                                  const line = buildReportLine(student);
+
+                                  return (
+                                    <div
+                                      key={`${report.day}-${student.login_42}`}
+                                      className={`report-line${success ? " report-line-success" : " report-line-danger"}`}
+                                    >
+                                      {line}
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        <p className="feedback">Aucune donnée détaillée pour cette journée.</p>
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })}
           </div>
         )}
       </section>
@@ -1067,7 +1618,7 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
           <h2>{formatLongDayLabel(dayKey)}</h2>
         </div>
         {state.loading ? (
-          <p className="feedback">Chargement de la journee...</p>
+          <p className="feedback">Chargement de la journée...</p>
         ) : state.error ? (
           <p className="feedback feedback-error">{state.error}</p>
         ) : state.payload ? (
@@ -1087,7 +1638,7 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
             </div>
           </>
         ) : (
-          <p className="feedback">Aucune donnee disponible pour cette journee.</p>
+          <p className="feedback">Aucune donnee disponible pour cette journée.</p>
         )}
       </section>
 
@@ -1110,6 +1661,10 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [selectedDayKey, setSelectedDayKey] = useState(() => formatDayKey(new Date()));
   const [selectedMonthKey, setSelectedMonthKey] = useState(() => formatMonthKey(new Date()));
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [blacklistModalOpen, setBlacklistModalOpen] = useState(false);
+  const [blacklistReasonInput, setBlacklistReasonInput] = useState("");
 
   async function loadUserDetail(targetLogin = login, options = {}) {
     const { monthKey = selectedMonthKey || formatMonthKey(new Date()), background = false } = options;
@@ -1151,6 +1706,10 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
   }, [state.payload]);
 
   useEffect(() => {
+    setBlacklistReasonInput(String(state.payload?.blacklist_reason || ""));
+  }, [state.payload?.blacklist_reason, login]);
+
+  useEffect(() => {
     return subscribeToLiveUpdates((event) => {
       const eventLogin = (event?.login || "").trim().toLowerCase();
       if (eventLogin !== login.trim().toLowerCase()) {
@@ -1176,27 +1735,129 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
     });
   }
 
-  return (
-    <main className="app-shell detail-shell">
-      <div className="action-row">
-        <button className="secondary-button" type="button" onClick={() => onNavigate("/")}>
-          Retour aux étudiants
-        </button>
-      </div>
+  async function patchAdminSettings(partial) {
+    setSettingsSaving(true);
+    setSettingsError("");
+    try {
+      const { response, json, text } = await requestJSON(`/api/admin/users/${encodeURIComponent(login)}`, {
+        method: "PATCH",
+        body: JSON.stringify(partial)
+      });
+      if (!response.ok) {
+        throw new Error((json && json.message) || text || "Impossible de mettre à jour cet étudiant.");
+      }
+      await loadUserDetail(login, { monthKey: selectedMonthKey, background: false });
+      return true;
+    } catch (updateError) {
+      setSettingsError(updateError instanceof Error ? updateError.message : String(updateError));
+      return false;
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
 
-      <UserPresencePanel
-        loading={state.loading}
-        error={state.error}
-        payload={state.payload}
-        login={login}
-        badgeDelaySeconds={badgeDelaySeconds}
-        selectedDayKey={selectedDayKey}
-        selectedMonthKey={selectedMonthKey}
-        onChangeMonth={handleChangeMonth}
-        onSelectDay={setSelectedDayKey}
-        dayEndpointBase={`/api/admin/students/${encodeURIComponent(login)}`}
-      />
-    </main>
+  async function handleConfirmBlacklist() {
+    const success = await patchAdminSettings({
+      is_blacklisted: true,
+      blacklist_reason: blacklistReasonInput
+    });
+    if (success) {
+      setBlacklistModalOpen(false);
+    }
+  }
+
+  async function handleConfirmForgive() {
+    const success = await patchAdminSettings({
+      is_blacklisted: false
+    });
+    if (success) {
+      setBlacklistModalOpen(false);
+    }
+  }
+
+  const isBlacklisted = Boolean(state.payload?.is_blacklisted);
+
+  async function handleStatusChange(nextStatus) {
+    const detectedStatus = getDetectedStatus(state.payload);
+    const normalizedStatus = String(nextStatus || "").trim().toLowerCase();
+    const shouldOverride = normalizedStatus !== detectedStatus;
+    await patchAdminSettings({
+      status: normalizedStatus,
+      status_overridden: shouldOverride
+    });
+  }
+
+  return (
+    <>
+      <main className="app-shell detail-shell">
+        <AdminHeader
+          user={user}
+          badgeDelaySeconds={badgeDelaySeconds}
+          onLogout={onLogout}
+          onToggleView={onToggleView}
+          activeSection="students"
+          onNavigate={onNavigate}
+        />
+        <div className="action-row">
+          <button className="secondary-button" type="button" onClick={() => onNavigate("/")}>
+            Retour aux étudiants
+          </button>
+        </div>
+
+        <UserPresencePanel
+          loading={state.loading}
+          error={state.error || settingsError}
+          payload={state.payload}
+          login={login}
+          badgeDelaySeconds={badgeDelaySeconds}
+          selectedDayKey={selectedDayKey}
+          selectedMonthKey={selectedMonthKey}
+          onChangeMonth={handleChangeMonth}
+          onSelectDay={setSelectedDayKey}
+          dayEndpointBase={`/api/admin/students/${encodeURIComponent(login)}`}
+          adminControls={{
+            isBlacklisted,
+            status: getEffectiveStatus(state.payload),
+            status42: getDetectedStatus(state.payload),
+            statusOverridden: Boolean(state.payload?.status_overridden),
+            saving: settingsSaving,
+            onOpenBlacklistModal: () => {
+              setBlacklistReasonInput(String(state.payload?.blacklist_reason || ""));
+              setBlacklistModalOpen(true);
+            },
+            onStatusChange: handleStatusChange
+          }}
+        />
+      </main>
+      <ConfirmationModal
+        open={blacklistModalOpen}
+        title={isBlacklisted ? "Pardonner l’étudiant" : "Blacklister l’étudiant"}
+        confirmLabel={isBlacklisted ? "Pardonner" : "Blacklister"}
+        tone="danger"
+        onClose={() => setBlacklistModalOpen(false)}
+        onConfirm={isBlacklisted ? handleConfirmForgive : handleConfirmBlacklist}
+      >
+        {isBlacklisted ? (
+          <>
+            <p>Cette action retire l’étudiant de la blacklist.</p>
+            {state.payload?.blacklist_reason ? <p>Le motif existant sera conservé.</p> : null}
+          </>
+        ) : (
+          <>
+            <p>Cette action empêche la badgeuse de traiter cet étudiant.</p>
+            <label className="field modal-field">
+              <span>Raison</span>
+              <textarea
+                rows="4"
+                value={blacklistReasonInput}
+                onChange={(event) => setBlacklistReasonInput(event.target.value)}
+                placeholder="Raison de la blacklist"
+              />
+            </label>
+          </>
+        )}
+      </ConfirmationModal>
+    </>
   );
 }
 
@@ -1210,7 +1871,8 @@ function UserPresencePanel({
   selectedMonthKey,
   onChangeMonth,
   onSelectDay,
-  dayEndpointBase
+  dayEndpointBase,
+  adminControls = null
 }) {
   return (
     <section className="panel">
@@ -1223,21 +1885,48 @@ function UserPresencePanel({
           <div className="user-detail-main">
             <div className="user-detail-main-header">
               <div className="user-detail-hero">
-                {payload.photo_url ? (
-                  <img className="user-detail-avatar" src={payload.photo_url} alt="" />
-                ) : (
-                  <div className="user-detail-avatar user-avatar-fallback" aria-hidden>
-                    {payload.login_42.slice(0, 2).toUpperCase()}
-                  </div>
-                )}
+                <UserAvatar user={payload} className="user-detail-avatar" />
                 <div className="user-detail-meta">
-                  <h2>{payload.login_42}</h2>
-                  <p>{formatStatusLabel(payload.status)}</p>
+                  <h2>
+                    {payload.login_42} <UserStateBadges user={payload} />
+                  </h2>
+                  {adminControls ? (
+                    <AdminStatusField
+                      value={adminControls.status}
+                      detectedValue={adminControls.status42}
+                      disabled={adminControls.saving}
+                      onChange={adminControls.onStatusChange}
+                    />
+                  ) : (
+                    <p>
+                      {getStatusOption(getEffectiveStatus(payload)).emoji} {formatStatusLabel(getEffectiveStatus(payload))}
+                    </p>
+                  )}
                   <span>Last badge: {formatLastBadgeAt(payload.last_badge_at)}</span>
                 </div>
               </div>
+              {adminControls ? (
+                <div className="admin-actions-row admin-actions-row-header">
+                  <BlacklistActionButton
+                    blacklisted={adminControls.isBlacklisted}
+                    disabled={adminControls.saving}
+                    onClick={adminControls.onOpenBlacklistModal}
+                  />
+                </div>
+              ) : null}
               <BadgeDelayChip seconds={badgeDelaySeconds} />
             </div>
+            {payload.is_blacklisted ? (
+              <div className="warning-callout blacklist-callout" role="alert" aria-label="Blacklist">
+                <strong>Vous êtes blacklisté</strong>
+                <p>
+                  Le bocal a pris la décision de désactiver la badgeuse pour justifier votre présence.
+                  <br />
+                  Uniquement le logtime sera communiqué au CFA.
+                </p>
+                {adminControls && payload.blacklist_reason ? <p>Motif: {payload.blacklist_reason}</p> : null}
+              </div>
+            ) : null}
             <div className="warning-callout" role="note" aria-label="Avertissement">
               <strong>Attention</strong>
               <p>
@@ -1260,7 +1949,7 @@ function UserPresencePanel({
             />
           ) : (
             <section className="admin-day-summary-slot admin-day-summary-empty">
-              <p className="feedback">Choisissez une journee dans le calendrier pour afficher la timeline.</p>
+              <p className="feedback">Choisissez une journée dans le calendrier pour afficher la timeline.</p>
             </section>
           )}
           <div className="user-detail-calendar-column">
@@ -1291,6 +1980,7 @@ function App() {
   const [path, setPath] = useState(() => window.location.pathname);
   const adminUserMatch = path.match(/^\/admin\/([^/]+)$/);
   const adminUserLogin = adminUserMatch ? decodeURIComponent(adminUserMatch[1]) : "";
+  const isAdminReportsPath = path === "/reports";
 
   useEffect(() => {
     function handlePopState() {
@@ -1426,6 +2116,18 @@ function App() {
       return (
         <AdminUserDetailView
           login={adminUserLogin}
+          user={authState.user}
+          badgeDelaySeconds={badgeDelaySeconds}
+          onLogout={handleLogout}
+          onToggleView={handleToggleAdminView}
+          onNavigate={navigateTo}
+        />
+      );
+    }
+
+    if (isAdminReportsPath) {
+      return (
+        <AdminReportsView
           user={authState.user}
           badgeDelaySeconds={badgeDelaySeconds}
           onLogout={handleLogout}

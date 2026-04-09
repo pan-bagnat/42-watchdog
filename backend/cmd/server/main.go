@@ -25,6 +25,7 @@ func startHTTPServer(port string) {
 	http.Handle("/commands", requireAdminAuth(http.HandlerFunc(commandHandler)))
 	http.Handle("/api/admin/commands", requireAdminAuth(http.HandlerFunc(commandHandler)))
 	http.Handle("/api/admin/calendar", requireAdminAuth(http.HandlerFunc(adminCalendarHandler)))
+	http.Handle("/api/admin/reports", requireAdminAuth(http.HandlerFunc(adminReportsHandler)))
 	http.Handle("/api/admin/student-days/", requireAdminAuth(http.HandlerFunc(adminStudentDaysHandler)))
 	http.Handle("/api/admin/users", requireAdminAuth(http.HandlerFunc(adminUsersHandler)))
 	http.Handle("/api/admin/users/", requireAdminAuth(http.HandlerFunc(adminUserDetailHandler)))
@@ -44,6 +45,7 @@ func startHTTPServer(port string) {
 	watchdog.Log("       ├── /commands")
 	watchdog.Log("       ├── /api/admin/commands")
 	watchdog.Log("       ├── /api/admin/calendar")
+	watchdog.Log("       ├── /api/admin/reports")
 	watchdog.Log("       ├── /api/admin/student-days/{login}")
 	watchdog.Log("       ├── /api/admin/users")
 	watchdog.Log("       ├── /api/admin/users/{login}")
@@ -107,7 +109,6 @@ func main() {
 	sig := <-shutdownSignals
 	fmt.Printf("\n") // Used to not display log on the same line as ^C
 	watchdog.Log(fmt.Sprintf("Received signal: %v. Starting graceful shutdown...", sig))
-	watchdog.PostApprenticesAttendances()
 	watchdog.AllowEvents(false)
 	watchdog.CloseStorage()
 	watchdog.Log("Watchdog shut down successfully")

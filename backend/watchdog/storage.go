@@ -44,6 +44,14 @@ type DayAvailability struct {
 	Live         bool   `json:"live"`
 }
 
+type DailyReportSummary struct {
+	DayKey       string `json:"day_key"`
+	StudentCount int    `json:"student_count"`
+	PostedCount  int    `json:"posted_count"`
+	FailedCount  int    `json:"failed_count"`
+	Live         bool   `json:"live"`
+}
+
 type StudentAttendanceDaySummary struct {
 	DayKey      string        `json:"day_key"`
 	FirstAccess time.Time     `json:"first_access"`
@@ -55,10 +63,17 @@ type StudentAttendanceDaySummary struct {
 }
 
 type AdminUserSummary struct {
-	Login42      string      `json:"login_42"`
-	IsApprentice bool        `json:"is_apprentice"`
-	Profile      ProfileType `json:"profile"`
-	LastBadgeAt  time.Time   `json:"last_badge_at"`
+	Login42          string        `json:"login_42"`
+	IsApprentice     bool          `json:"is_apprentice"`
+	Profile          ProfileType   `json:"profile"`
+	Status           string        `json:"status"`
+	Status42         string        `json:"status_42"`
+	StatusOverridden bool          `json:"status_overridden"`
+	IsBlacklisted    bool          `json:"is_blacklisted"`
+	BadgePostingOff  bool          `json:"badge_posting_off"`
+	BlacklistReason  string        `json:"blacklist_reason"`
+	LastBadgeAt      time.Time     `json:"last_badge_at"`
+	DayDuration      time.Duration `json:"day_duration"`
 }
 
 var (
@@ -70,6 +85,26 @@ var (
 )
 
 const storageSchema = `
+CREATE TABLE IF NOT EXISTS watchdog_users (
+	login_42 TEXT PRIMARY KEY,
+	id_42 TEXT NOT NULL DEFAULT '',
+	control_access_id INTEGER NOT NULL DEFAULT 0,
+	control_access_name TEXT NOT NULL DEFAULT '',
+	is_apprentice INTEGER NOT NULL DEFAULT 0,
+	profile INTEGER NOT NULL DEFAULT 4,
+	status TEXT NOT NULL DEFAULT 'student',
+	status_42 TEXT NOT NULL DEFAULT 'student',
+	status_overridden INTEGER NOT NULL DEFAULT 0,
+	is_blacklisted INTEGER NOT NULL DEFAULT 0,
+	badge_posting_off INTEGER NOT NULL DEFAULT 0,
+	blacklist_reason TEXT NOT NULL DEFAULT '',
+	photo_url TEXT NOT NULL DEFAULT '',
+	photo_fetched_at TEXT,
+	last_status_checked_at TEXT,
+	updated_at TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS watchdog_current_users (
 	day_key TEXT NOT NULL,
 	control_access_id INTEGER NOT NULL,
@@ -81,8 +116,6 @@ CREATE TABLE IF NOT EXISTS watchdog_current_users (
 	first_access TEXT,
 	last_access TEXT,
 	duration_seconds BIGINT NOT NULL DEFAULT 0,
-	status TEXT NOT NULL DEFAULT '',
-	error_message TEXT,
 	updated_at TEXT NOT NULL,
 	PRIMARY KEY (day_key, control_access_id)
 );
@@ -127,6 +160,7 @@ CREATE TABLE IF NOT EXISTS watchdog_daily_student_summaries (
 	badge_duration_seconds BIGINT NOT NULL DEFAULT 0,
 	retained_duration_seconds BIGINT NOT NULL DEFAULT 0,
 	status TEXT NOT NULL DEFAULT '',
+	post_result TEXT NOT NULL DEFAULT '',
 	error_message TEXT,
 	finalized_at TEXT NOT NULL,
 	PRIMARY KEY (day_key, login_42)
@@ -176,13 +210,6 @@ CREATE TABLE IF NOT EXISTS watchdog_finalized_days (
 	day_key TEXT PRIMARY KEY,
 	finalized_at TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS watchdog_profile_photos (
-	login_42 TEXT PRIMARY KEY,
-	photo_url TEXT NOT NULL DEFAULT '',
-	fetched_at TEXT NOT NULL,
-	updated_at TEXT NOT NULL
-);
 `
 
 func InitStorage() error {
@@ -209,6 +236,11 @@ func InitStorage() error {
 		_ = db.Close()
 		storageDB = nil
 		return fmt.Errorf("init postgres schema: %w", err)
+	}
+	if err := migrateStorageSchema(); err != nil {
+		_ = db.Close()
+		storageDB = nil
+		return fmt.Errorf("migrate postgres schema: %w", err)
 	}
 
 	Log("[WATCHDOG] 💽 PostgreSQL storage ready")
@@ -250,6 +282,413 @@ func rebindPostgres(query string) string {
 		out.WriteRune(char)
 	}
 	return out.String()
+}
+
+func storageTableExists(name string) (bool, error) {
+	if storageDB == nil {
+		return false, nil
+	}
+
+	var exists bool
+	err := storageQueryRow(`
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.tables
+			WHERE table_schema = 'public' AND table_name = ?
+		)
+	`, strings.TrimSpace(name)).Scan(&exists)
+	return exists, err
+}
+
+func migrateStorageSchema() error {
+	if storageDB == nil {
+		return nil
+	}
+
+	if err := migrateUsersTable(); err != nil {
+		return err
+	}
+	if err := migrateCurrentUsersTable(); err != nil {
+		return err
+	}
+	if err := migrateDailyStudentSummariesTable(); err != nil {
+		return err
+	}
+
+	legacyTables := []string{
+		"watchdog_profile_photos",
+		"watchdog_student_status_state",
+		"watchdog_student_status_history",
+		"watchdog_user_settings",
+	}
+	for _, tableName := range legacyTables {
+		if _, err := storageExec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, tableName)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateDailyStudentSummariesTable() error {
+	if storageDB == nil {
+		return nil
+	}
+
+	if _, err := storageExec(`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS post_result TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+
+	_, err := storageExec(`
+		UPDATE watchdog_daily_student_summaries
+		SET
+			post_result = CASE
+				WHEN TRIM(post_result) = '' AND TRIM(status) NOT IN ('student', 'apprentice', 'pisciner', 'staff', 'extern') THEN status
+				ELSE post_result
+			END,
+			status = CASE
+				WHEN TRIM(status) NOT IN ('student', 'apprentice', 'pisciner', 'staff', 'extern') THEN
+					CASE
+						WHEN is_apprentice = 1 THEN 'apprentice'
+						WHEN profile = 2 THEN 'pisciner'
+						WHEN profile = 1 THEN 'staff'
+						WHEN profile = 4 THEN 'student'
+						ELSE 'extern'
+					END
+				ELSE status
+			END
+	`)
+	return err
+}
+
+func migrateCurrentUsersTable() error {
+	if storageDB == nil {
+		return nil
+	}
+
+	dropStatements := []string{
+		`ALTER TABLE watchdog_current_users DROP COLUMN IF EXISTS status`,
+		`ALTER TABLE watchdog_current_users DROP COLUMN IF EXISTS post_result`,
+		`ALTER TABLE watchdog_current_users DROP COLUMN IF EXISTS error_message`,
+	}
+	for _, statement := range dropStatements {
+		if _, err := storageExec(statement); err != nil {
+			return err
+		}
+	}
+
+	if _, err := storageExec(`ALTER TABLE watchdog_current_users ADD COLUMN IF NOT EXISTS is_apprentice INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := storageExec(`ALTER TABLE watchdog_current_users ADD COLUMN IF NOT EXISTS profile INTEGER NOT NULL DEFAULT 4`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateUsersTable() error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+
+	alterStatements := []string{
+		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'student'`,
+		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status_42 TEXT NOT NULL DEFAULT 'student'`,
+		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status_overridden INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, statement := range alterStatements {
+		if _, err := storageExec(statement); err != nil {
+			return err
+		}
+	}
+
+	seedStatements := []string{
+		`
+		INSERT INTO watchdog_users (
+			login_42, id_42, control_access_id, control_access_name, is_apprentice, profile, status, status_42, updated_at, created_at
+		)
+		SELECT
+			login_42,
+			id_42,
+			control_access_id,
+			control_access_name,
+			is_apprentice,
+			profile,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			?,
+			?
+		FROM (
+			SELECT DISTINCT ON (login_42)
+				login_42, id_42, control_access_id, control_access_name, is_apprentice, profile
+			FROM watchdog_daily_student_summaries
+			WHERE login_42 <> ''
+			ORDER BY login_42, finalized_at DESC, day_key DESC
+		) AS summaries
+		ON CONFLICT (login_42) DO NOTHING
+		`,
+		`
+		INSERT INTO watchdog_users (
+			login_42, id_42, control_access_id, control_access_name, is_apprentice, profile, status, status_42, updated_at, created_at
+		)
+		SELECT
+			login_42,
+			id_42,
+			control_access_id,
+			control_access_name,
+			is_apprentice,
+			profile,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			?,
+			?
+		FROM (
+			SELECT DISTINCT ON (login_42)
+				login_42, id_42, control_access_id, control_access_name, is_apprentice, profile
+			FROM watchdog_day_profiles
+			WHERE login_42 <> ''
+			ORDER BY login_42, updated_at DESC, day_key DESC
+		) AS profiles
+		ON CONFLICT (login_42) DO UPDATE SET
+			id_42 = CASE WHEN excluded.id_42 <> '' THEN excluded.id_42 ELSE watchdog_users.id_42 END,
+			control_access_id = CASE WHEN excluded.control_access_id <> 0 THEN excluded.control_access_id ELSE watchdog_users.control_access_id END,
+			control_access_name = CASE WHEN excluded.control_access_name <> '' THEN excluded.control_access_name ELSE watchdog_users.control_access_name END,
+			is_apprentice = excluded.is_apprentice,
+			profile = excluded.profile,
+			status_42 = excluded.status_42,
+			status = CASE WHEN watchdog_users.status_overridden = 1 THEN watchdog_users.status ELSE excluded.status END,
+			updated_at = excluded.updated_at
+		`,
+		`
+		INSERT INTO watchdog_users (
+			login_42, id_42, control_access_id, control_access_name, is_apprentice, profile, status, status_42, updated_at, created_at
+		)
+		SELECT
+			login_42,
+			id_42,
+			control_access_id,
+			control_access_name,
+			is_apprentice,
+			profile,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			?,
+			?
+		FROM (
+			SELECT DISTINCT ON (login_42)
+				login_42, id_42, control_access_id, control_access_name, is_apprentice, profile
+			FROM watchdog_current_users
+			WHERE login_42 <> ''
+			ORDER BY login_42, updated_at DESC, day_key DESC
+		) AS current_users
+		ON CONFLICT (login_42) DO UPDATE SET
+			id_42 = CASE WHEN excluded.id_42 <> '' THEN excluded.id_42 ELSE watchdog_users.id_42 END,
+			control_access_id = CASE WHEN excluded.control_access_id <> 0 THEN excluded.control_access_id ELSE watchdog_users.control_access_id END,
+			control_access_name = CASE WHEN excluded.control_access_name <> '' THEN excluded.control_access_name ELSE watchdog_users.control_access_name END,
+			is_apprentice = excluded.is_apprentice,
+			profile = excluded.profile,
+			status_42 = excluded.status_42,
+			status = CASE WHEN watchdog_users.status_overridden = 1 THEN watchdog_users.status ELSE excluded.status END,
+			updated_at = excluded.updated_at
+		`,
+	}
+
+	for _, statement := range seedStatements {
+		if _, err := storageExec(statement, now, now); err != nil {
+			return err
+		}
+	}
+
+	if exists, err := storageTableExists("watchdog_user_settings"); err != nil {
+		return err
+	} else if exists {
+		if _, err := storageExec(`
+			UPDATE watchdog_users AS users
+			SET
+				is_blacklisted = settings.is_blacklisted,
+				badge_posting_off = settings.badge_posting_off,
+				blacklist_reason = settings.blacklist_reason,
+				updated_at = settings.updated_at
+			FROM watchdog_user_settings AS settings
+			WHERE settings.login_42 = users.login_42
+		`); err != nil {
+			return err
+		}
+		if _, err := storageExec(`
+			INSERT INTO watchdog_users (
+				login_42, is_blacklisted, badge_posting_off, blacklist_reason, updated_at, created_at
+			)
+			SELECT login_42, is_blacklisted, badge_posting_off, blacklist_reason, updated_at, updated_at
+			FROM watchdog_user_settings
+			ON CONFLICT (login_42) DO UPDATE SET
+				is_blacklisted = excluded.is_blacklisted,
+				badge_posting_off = excluded.badge_posting_off,
+				blacklist_reason = excluded.blacklist_reason,
+				updated_at = excluded.updated_at
+		`); err != nil {
+			return err
+		}
+	}
+
+	if exists, err := storageTableExists("watchdog_profile_photos"); err != nil {
+		return err
+	} else if exists {
+		if _, err := storageExec(`
+			UPDATE watchdog_users AS users
+			SET
+				photo_url = photos.photo_url,
+				photo_fetched_at = photos.fetched_at,
+				updated_at = photos.updated_at
+			FROM watchdog_profile_photos AS photos
+			WHERE photos.login_42 = users.login_42
+		`); err != nil {
+			return err
+		}
+		if _, err := storageExec(`
+			INSERT INTO watchdog_users (
+				login_42, photo_url, photo_fetched_at, updated_at, created_at
+			)
+			SELECT login_42, photo_url, fetched_at, updated_at, updated_at
+			FROM watchdog_profile_photos
+			ON CONFLICT (login_42) DO UPDATE SET
+				photo_url = excluded.photo_url,
+				photo_fetched_at = excluded.photo_fetched_at,
+				updated_at = excluded.updated_at
+		`); err != nil {
+			return err
+		}
+	}
+
+	if exists, err := storageTableExists("watchdog_student_status_state"); err != nil {
+		return err
+	} else if exists {
+		if _, err := storageExec(`
+			UPDATE watchdog_users AS users
+			SET
+				is_apprentice = statuses.is_apprentice,
+				last_status_checked_at = statuses.last_checked_at,
+				updated_at = statuses.updated_at
+			FROM watchdog_student_status_state AS statuses
+			WHERE statuses.login_42 = users.login_42
+		`); err != nil {
+			return err
+		}
+		if _, err := storageExec(`
+			INSERT INTO watchdog_users (
+				login_42, is_apprentice, last_status_checked_at, updated_at, created_at
+			)
+			SELECT login_42, is_apprentice, last_checked_at, updated_at, updated_at
+			FROM watchdog_student_status_state
+			ON CONFLICT (login_42) DO UPDATE SET
+				is_apprentice = excluded.is_apprentice,
+				last_status_checked_at = excluded.last_status_checked_at,
+				updated_at = excluded.updated_at
+		`); err != nil {
+			return err
+		}
+	}
+
+	if _, err := storageExec(`
+		UPDATE watchdog_users
+		SET
+			status_42 = CASE
+				WHEN is_apprentice = 1 THEN 'apprentice'
+				WHEN profile = 2 THEN 'pisciner'
+				WHEN profile = 1 THEN 'staff'
+				WHEN profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			status = CASE
+				WHEN status_overridden = 1 AND TRIM(status) <> '' THEN status
+				ELSE CASE
+					WHEN is_apprentice = 1 THEN 'apprentice'
+					WHEN profile = 2 THEN 'pisciner'
+					WHEN profile = 1 THEN 'staff'
+					WHEN profile = 4 THEN 'student'
+					ELSE 'extern'
+				END
+			END
+	`); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func saveUserIdentity(user User) error {
+	if storageDB == nil {
+		return nil
+	}
+
+	login := normalizeLogin(user.Login42)
+	if login == "" {
+		return nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	detectedStatus := statusFromSignals(user.IsApprentice, user.Profile)
+	_, err := storageExec(`
+		INSERT INTO watchdog_users (
+			login_42, id_42, control_access_id, control_access_name, is_apprentice, profile, status, status_42, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(login_42) DO UPDATE SET
+			id_42 = CASE WHEN excluded.id_42 <> '' THEN excluded.id_42 ELSE watchdog_users.id_42 END,
+			control_access_id = CASE WHEN excluded.control_access_id <> 0 THEN excluded.control_access_id ELSE watchdog_users.control_access_id END,
+			control_access_name = CASE WHEN excluded.control_access_name <> '' THEN excluded.control_access_name ELSE watchdog_users.control_access_name END,
+			is_apprentice = excluded.is_apprentice,
+			profile = excluded.profile,
+			status_42 = excluded.status_42,
+			status = CASE
+				WHEN watchdog_users.status_overridden = 1 AND watchdog_users.status_42 = excluded.status_42 THEN watchdog_users.status
+				ELSE excluded.status
+			END,
+			updated_at = excluded.updated_at
+	`,
+		login,
+		strings.TrimSpace(user.ID42),
+		user.ControlAccessID,
+		strings.TrimSpace(user.ControlAccessName),
+		boolToInt(user.IsApprentice),
+		int(user.Profile),
+		detectedStatus,
+		detectedStatus,
+		now,
+		now,
+	)
+	return err
 }
 
 func restorePersistentState() error {
@@ -337,6 +776,9 @@ func saveDayProfile(dayKey string, user User) error {
 	if storageDB == nil {
 		return nil
 	}
+	if err := saveUserIdentity(user); err != nil {
+		return err
+	}
 
 	_, err := storageExec(`
 		INSERT INTO watchdog_day_profiles (
@@ -366,6 +808,9 @@ func saveCurrentUser(dayKey string, user User) error {
 	if storageDB == nil {
 		return nil
 	}
+	if err := saveUserIdentity(user); err != nil {
+		return err
+	}
 
 	var firstAccess any
 	if !user.FirstAccess.IsZero() {
@@ -375,16 +820,11 @@ func saveCurrentUser(dayKey string, user User) error {
 	if !user.LastAccess.IsZero() {
 		lastAccess = user.LastAccess.UTC().Format(time.RFC3339Nano)
 	}
-	var errorMessage any
-	if user.Error != nil {
-		errorMessage = user.Error.Error()
-	}
-
 	_, err := storageExec(`
 		INSERT INTO watchdog_current_users (
 			day_key, control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, duration_seconds, status, error_message, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			first_access, last_access, duration_seconds, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day_key, control_access_id) DO UPDATE SET
 			control_access_name = excluded.control_access_name,
 			login_42 = excluded.login_42,
@@ -394,8 +834,6 @@ func saveCurrentUser(dayKey string, user User) error {
 			first_access = excluded.first_access,
 			last_access = excluded.last_access,
 			duration_seconds = excluded.duration_seconds,
-			status = excluded.status,
-			error_message = excluded.error_message,
 			updated_at = excluded.updated_at
 	`,
 		dayKey,
@@ -408,8 +846,6 @@ func saveCurrentUser(dayKey string, user User) error {
 		firstAccess,
 		lastAccess,
 		int64(user.Duration/time.Second),
-		user.Status,
-		errorMessage,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	return err
@@ -538,17 +974,23 @@ func loadCurrentUsersDayKey() (string, error) {
 	return strings.TrimSpace(dayKey.String), nil
 }
 
-func loadCurrentUsersForDay(dayKey string) ([]User, error) {
+func loadCurrentUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error) {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return nil, nil
 	}
 
-	rows, err := storageQuery(`
+	query := `
 		SELECT control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, duration_seconds, status, error_message
+			first_access, last_access, duration_seconds
 		FROM watchdog_current_users
 		WHERE day_key = ?
-	`, dayKey)
+	`
+	args := []any{dayKey}
+	if apprenticesOnly {
+		query += ` AND is_apprentice = 1`
+	}
+
+	rows, err := storageQuery(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -562,8 +1004,6 @@ func loadCurrentUsersForDay(dayKey string) ([]User, error) {
 		var firstAccess sql.NullString
 		var lastAccess sql.NullString
 		var durationSeconds int64
-		var status sql.NullString
-		var errorMessage sql.NullString
 
 		if err := rows.Scan(
 			&user.ControlAccessID,
@@ -575,8 +1015,6 @@ func loadCurrentUsersForDay(dayKey string) ([]User, error) {
 			&firstAccess,
 			&lastAccess,
 			&durationSeconds,
-			&status,
-			&errorMessage,
 		); err != nil {
 			return nil, err
 		}
@@ -584,7 +1022,6 @@ func loadCurrentUsersForDay(dayKey string) ([]User, error) {
 		user.IsApprentice = isApprentice == 1
 		user.Profile = ProfileType(profile)
 		user.Duration = time.Duration(durationSeconds) * time.Second
-		user.Status = status.String
 		if firstAccess.Valid {
 			user.FirstAccess, err = time.Parse(time.RFC3339Nano, firstAccess.String)
 			if err != nil {
@@ -597,13 +1034,293 @@ func loadCurrentUsersForDay(dayKey string) ([]User, error) {
 				return nil, err
 			}
 		}
-		if errorMessage.Valid && strings.TrimSpace(errorMessage.String) != "" {
-			user.Error = fmt.Errorf("%s", errorMessage.String)
-		}
-
 		users = append(users, user)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	logins := make([]string, 0, len(users))
+	for _, user := range users {
+		logins = append(logins, user.Login42)
+	}
+	settingsByLogin, err := loadUserSettingsMap(logins)
+	if err != nil {
+		return nil, err
+	}
+	for index := range users {
+		if settings, ok := settingsByLogin[normalizeLogin(users[index].Login42)]; ok {
+			applyUserSettings(&users[index], settings)
+		} else {
+			users[index].Status42 = statusFromSignals(users[index].IsApprentice, users[index].Profile)
+			users[index].Status = users[index].Status42
+		}
+	}
+	return users, nil
+}
+
+type studentStatusStateRecord struct {
+	Login42       string
+	IsApprentice  bool
+	LastCheckedAt time.Time
+}
+
+type UserSettings struct {
+	Login42          string `json:"login_42"`
+	Status           string `json:"status"`
+	Status42         string `json:"status_42"`
+	StatusOverridden bool   `json:"status_overridden"`
+	IsBlacklisted    bool   `json:"is_blacklisted"`
+	BadgePostingOff  bool   `json:"badge_posting_off"`
+	BlacklistReason  string `json:"blacklist_reason,omitempty"`
+}
+
+func loadUserSettings(login string) (UserSettings, bool, error) {
+	if storageDB == nil {
+		return UserSettings{}, false, nil
+	}
+
+	login = normalizeLogin(login)
+	var (
+		settings         UserSettings
+		statusOverridden int
+		isBlacklisted    int
+		badgePostingOff  int
+	)
+
+	err := storageQueryRow(`
+		SELECT login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason
+		FROM watchdog_users
+		WHERE login_42 = ?
+	`, login).Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &settings.BlacklistReason)
+	if err == sql.ErrNoRows {
+		return UserSettings{}, false, nil
+	}
+	if err != nil {
+		return UserSettings{}, false, err
+	}
+
+	settings.Status = normalizeManagedUserStatus(settings.Status)
+	settings.Status42 = normalizeManagedUserStatus(settings.Status42)
+	settings.StatusOverridden = statusOverridden == 1
+	settings.IsBlacklisted = isBlacklisted == 1
+	settings.BadgePostingOff = badgePostingOff == 1
+	settings.BlacklistReason = strings.TrimSpace(settings.BlacklistReason)
+	return settings, true, nil
+}
+
+func loadUserSettingsMap(logins []string) (map[string]UserSettings, error) {
+	if storageDB == nil || len(logins) == 0 {
+		return map[string]UserSettings{}, nil
+	}
+
+	seen := make(map[string]struct{}, len(logins))
+	uniqueLogins := make([]string, 0, len(logins))
+	for _, login := range logins {
+		login = normalizeLogin(login)
+		if login == "" {
+			continue
+		}
+		if _, ok := seen[login]; ok {
+			continue
+		}
+		seen[login] = struct{}{}
+		uniqueLogins = append(uniqueLogins, login)
+	}
+	if len(uniqueLogins) == 0 {
+		return map[string]UserSettings{}, nil
+	}
+
+	placeholders := make([]string, 0, len(uniqueLogins))
+	args := make([]any, 0, len(uniqueLogins))
+	for _, login := range uniqueLogins {
+		placeholders = append(placeholders, "?")
+		args = append(args, login)
+	}
+
+	rows, err := storageQuery(fmt.Sprintf(`
+		SELECT login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason
+		FROM watchdog_users
+		WHERE login_42 IN (%s)
+	`, strings.Join(placeholders, ",")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settingsByLogin := make(map[string]UserSettings, len(uniqueLogins))
+	for rows.Next() {
+		var (
+			settings         UserSettings
+			statusOverridden int
+			isBlacklisted    int
+			badgePostingOff  int
+		)
+		if err := rows.Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &settings.BlacklistReason); err != nil {
+			return nil, err
+		}
+		settings.Status = normalizeManagedUserStatus(settings.Status)
+		settings.Status42 = normalizeManagedUserStatus(settings.Status42)
+		settings.StatusOverridden = statusOverridden == 1
+		settings.IsBlacklisted = isBlacklisted == 1
+		settings.BadgePostingOff = badgePostingOff == 1
+		settings.BlacklistReason = strings.TrimSpace(settings.BlacklistReason)
+		settingsByLogin[normalizeLogin(settings.Login42)] = settings
+	}
+	return settingsByLogin, rows.Err()
+}
+
+func saveUserSettings(settings UserSettings) error {
+	if storageDB == nil {
+		return nil
+	}
+
+	settings.Login42 = normalizeLogin(settings.Login42)
+	if settings.Login42 == "" {
+		return nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := storageExec(`
+		INSERT INTO watchdog_users (
+			login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(login_42) DO UPDATE SET
+			status = excluded.status,
+			status_42 = excluded.status_42,
+			status_overridden = excluded.status_overridden,
+			is_blacklisted = excluded.is_blacklisted,
+			badge_posting_off = excluded.badge_posting_off,
+			blacklist_reason = excluded.blacklist_reason,
+			updated_at = excluded.updated_at
+	`,
+		settings.Login42,
+		coalesceManagedStatus(settings.Status, settings.Status42),
+		coalesceManagedStatus(settings.Status42, settings.Status),
+		boolToInt(settings.StatusOverridden),
+		boolToInt(settings.IsBlacklisted),
+		boolToInt(settings.BadgePostingOff),
+		strings.TrimSpace(settings.BlacklistReason),
+		now,
+		now,
+	)
+	return err
+}
+
+func applyUserSettings(user *User, settings UserSettings) {
+	if user == nil {
+		return
+	}
+	detectedStatus := statusFromSignals(user.IsApprentice, user.Profile)
+	user.Status42 = coalesceManagedStatus(settings.Status42, detectedStatus)
+	user.Status = user.Status42
+	user.StatusOverridden = false
+	if settings.StatusOverridden {
+		if overriddenStatus := coalesceManagedStatus(settings.Status, user.Status42); overriddenStatus != "" {
+			user.Status = overriddenStatus
+			user.StatusOverridden = overriddenStatus != user.Status42
+			user.IsApprentice, user.Profile = signalsFromStatus(overriddenStatus)
+		}
+	}
+	user.IsBlacklisted = settings.IsBlacklisted
+	user.BadgePostingOff = settings.BadgePostingOff
+	user.BlacklistReason = settings.BlacklistReason
+}
+
+func loadStudentStatusState(login string) (studentStatusStateRecord, bool, error) {
+	if storageDB == nil {
+		return studentStatusStateRecord{}, false, nil
+	}
+
+	login = normalizeLogin(login)
+	var (
+		record         studentStatusStateRecord
+		isApprentice   int
+		lastCheckedRaw sql.NullString
+	)
+
+	err := storageQueryRow(`
+		SELECT login_42, is_apprentice, last_status_checked_at
+		FROM watchdog_users
+		WHERE login_42 = ?
+	`, login).Scan(&record.Login42, &isApprentice, &lastCheckedRaw)
+	if err == sql.ErrNoRows {
+		return studentStatusStateRecord{}, false, nil
+	}
+	if err != nil {
+		return studentStatusStateRecord{}, false, err
+	}
+
+	record.IsApprentice = isApprentice == 1
+	if lastCheckedRaw.Valid && strings.TrimSpace(lastCheckedRaw.String) != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, lastCheckedRaw.String)
+		if err != nil {
+			return studentStatusStateRecord{}, false, err
+		}
+		record.LastCheckedAt = parsed
+	}
+
+	return record, true, nil
+}
+
+func saveStudentStatusState(login string, isApprentice bool, checkedAt time.Time, fallbackPrevious *bool) error {
+	if storageDB == nil {
+		return nil
+	}
+	_ = fallbackPrevious
+
+	login = normalizeLogin(login)
+	if login == "" {
+		return nil
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var checkedAtValue any
+	if !checkedAt.IsZero() {
+		checkedAtValue = checkedAt.UTC().Format(time.RFC3339Nano)
+	}
+	detectedStatus := statusFromSignals(isApprentice, Student)
+
+	_, err := storageExec(`
+		INSERT INTO watchdog_users (login_42, is_apprentice, status, status_42, last_status_checked_at, updated_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(login_42) DO UPDATE SET
+			is_apprentice = excluded.is_apprentice,
+			status_42 = CASE
+				WHEN excluded.is_apprentice = 1 THEN 'apprentice'
+				WHEN watchdog_users.profile = 2 THEN 'pisciner'
+				WHEN watchdog_users.profile = 1 THEN 'staff'
+				WHEN watchdog_users.profile = 4 THEN 'student'
+				ELSE 'extern'
+			END,
+			status = CASE
+				WHEN watchdog_users.status_overridden = 1 AND watchdog_users.status_42 = CASE
+					WHEN excluded.is_apprentice = 1 THEN 'apprentice'
+					WHEN watchdog_users.profile = 2 THEN 'pisciner'
+					WHEN watchdog_users.profile = 1 THEN 'staff'
+					WHEN watchdog_users.profile = 4 THEN 'student'
+					ELSE 'extern'
+				END THEN watchdog_users.status
+				ELSE CASE
+					WHEN excluded.is_apprentice = 1 THEN 'apprentice'
+					WHEN watchdog_users.profile = 2 THEN 'pisciner'
+					WHEN watchdog_users.profile = 1 THEN 'staff'
+					WHEN watchdog_users.profile = 4 THEN 'student'
+					ELSE 'extern'
+				END
+			END,
+			last_status_checked_at = excluded.last_status_checked_at,
+			updated_at = excluded.updated_at
+	`,
+		login,
+		boolToInt(isApprentice),
+		detectedStatus,
+		detectedStatus,
+		checkedAtValue,
+		now,
+		now,
+	)
+	return err
 }
 
 func loadCurrentUserByLogin(dayKey, login string) (User, bool, error) {
@@ -619,13 +1336,11 @@ func loadCurrentUserByLogin(dayKey, login string) (User, bool, error) {
 		firstAccess     sql.NullString
 		lastAccess      sql.NullString
 		durationSeconds int64
-		status          sql.NullString
-		errorMessage    sql.NullString
 	)
 
 	err := storageQueryRow(`
 		SELECT control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, duration_seconds, status, error_message
+			first_access, last_access, duration_seconds
 		FROM watchdog_current_users
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(
@@ -638,8 +1353,6 @@ func loadCurrentUserByLogin(dayKey, login string) (User, bool, error) {
 		&firstAccess,
 		&lastAccess,
 		&durationSeconds,
-		&status,
-		&errorMessage,
 	)
 	if err == sql.ErrNoRows {
 		return User{}, false, nil
@@ -651,7 +1364,6 @@ func loadCurrentUserByLogin(dayKey, login string) (User, bool, error) {
 	user.IsApprentice = isApprentice == 1
 	user.Profile = ProfileType(profile)
 	user.Duration = time.Duration(durationSeconds) * time.Second
-	user.Status = status.String
 	if firstAccess.Valid {
 		parsed, err := time.Parse(time.RFC3339Nano, firstAccess.String)
 		if err != nil {
@@ -666,8 +1378,13 @@ func loadCurrentUserByLogin(dayKey, login string) (User, bool, error) {
 		}
 		user.LastAccess = parsed
 	}
-	if errorMessage.Valid && strings.TrimSpace(errorMessage.String) != "" {
-		user.Error = fmt.Errorf("%s", errorMessage.String)
+	if settings, ok, err := loadUserSettings(user.Login42); err != nil {
+		return User{}, false, err
+	} else if ok {
+		applyUserSettings(&user, settings)
+	} else {
+		user.Status42 = statusFromSignals(user.IsApprentice, user.Profile)
+		user.Status = user.Status42
 	}
 
 	return user, true, nil
@@ -685,13 +1402,11 @@ func loadCurrentUserByControlAccessID(dayKey string, controlAccessID int) (User,
 		firstAccess     sql.NullString
 		lastAccess      sql.NullString
 		durationSeconds int64
-		status          sql.NullString
-		errorMessage    sql.NullString
 	)
 
 	err := storageQueryRow(`
 		SELECT control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, duration_seconds, status, error_message
+			first_access, last_access, duration_seconds
 		FROM watchdog_current_users
 		WHERE day_key = ? AND control_access_id = ?
 	`, dayKey, controlAccessID).Scan(
@@ -704,8 +1419,6 @@ func loadCurrentUserByControlAccessID(dayKey string, controlAccessID int) (User,
 		&firstAccess,
 		&lastAccess,
 		&durationSeconds,
-		&status,
-		&errorMessage,
 	)
 	if err == sql.ErrNoRows {
 		return User{}, false, nil
@@ -717,7 +1430,6 @@ func loadCurrentUserByControlAccessID(dayKey string, controlAccessID int) (User,
 	user.IsApprentice = isApprentice == 1
 	user.Profile = ProfileType(profile)
 	user.Duration = time.Duration(durationSeconds) * time.Second
-	user.Status = status.String
 	if firstAccess.Valid {
 		parsed, err := time.Parse(time.RFC3339Nano, firstAccess.String)
 		if err != nil {
@@ -732,8 +1444,13 @@ func loadCurrentUserByControlAccessID(dayKey string, controlAccessID int) (User,
 		}
 		user.LastAccess = parsed
 	}
-	if errorMessage.Valid && strings.TrimSpace(errorMessage.String) != "" {
-		user.Error = fmt.Errorf("%s", errorMessage.String)
+	if settings, ok, err := loadUserSettings(user.Login42); err != nil {
+		return User{}, false, err
+	} else if ok {
+		applyUserSettings(&user, settings)
+	} else {
+		user.Status42 = statusFromSignals(user.IsApprentice, user.Profile)
+		user.Status = user.Status42
 	}
 
 	return user, true, nil
@@ -851,18 +1568,24 @@ func loadBadgeEventsForLogin(dayKey, login string) ([]BadgeEvent, error) {
 	return events, rows.Err()
 }
 
-func loadHistoricalUsersForDay(dayKey string) ([]User, error) {
+func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error) {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return nil, nil
 	}
 
-	rows, err := storageQuery(`
+	query := `
 		SELECT control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, retained_duration_seconds, status, error_message
+			first_access, last_access, retained_duration_seconds, status, post_result, error_message
 		FROM watchdog_daily_student_summaries
 		WHERE day_key = ?
-		ORDER BY login_42
-	`, dayKey)
+	`
+	args := []any{dayKey}
+	if apprenticesOnly {
+		query += ` AND is_apprentice = 1`
+	}
+	query += ` ORDER BY login_42`
+
+	rows, err := storageQuery(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -877,6 +1600,7 @@ func loadHistoricalUsersForDay(dayKey string) ([]User, error) {
 		var lastAccess sql.NullString
 		var durationSeconds int64
 		var status sql.NullString
+		var postResult sql.NullString
 		var errorMessage sql.NullString
 
 		if err := rows.Scan(
@@ -890,6 +1614,7 @@ func loadHistoricalUsersForDay(dayKey string) ([]User, error) {
 			&lastAccess,
 			&durationSeconds,
 			&status,
+			&postResult,
 			&errorMessage,
 		); err != nil {
 			return nil, err
@@ -899,6 +1624,8 @@ func loadHistoricalUsersForDay(dayKey string) ([]User, error) {
 		user.Profile = ProfileType(profile)
 		user.Duration = time.Duration(durationSeconds) * time.Second
 		user.Status = status.String
+		user.PostResult = postResult.String
+		normalizeHistoricalSummaryStatus(&user)
 		if firstAccess.Valid {
 			user.FirstAccess, err = time.Parse(time.RFC3339Nano, firstAccess.String)
 			if err != nil {
@@ -917,7 +1644,24 @@ func loadHistoricalUsersForDay(dayKey string) ([]User, error) {
 
 		users = append(users, user)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	logins := make([]string, 0, len(users))
+	for _, user := range users {
+		logins = append(logins, user.Login42)
+	}
+	settingsByLogin, err := loadUserSettingsMap(logins)
+	if err != nil {
+		return nil, err
+	}
+	for index := range users {
+		if settings, ok := settingsByLogin[normalizeLogin(users[index].Login42)]; ok {
+			applyUserSettings(&users[index], settings)
+		}
+	}
+	return users, nil
 }
 
 func loadDayAvailabilityForMonth(monthKey string) ([]DayAvailability, error) {
@@ -984,6 +1728,91 @@ func loadDayAvailabilityForMonth(monthKey string) ([]DayAvailability, error) {
 		return days[i].DayKey < days[j].DayKey
 	})
 	return days, nil
+}
+
+func loadDailyReportSummaries() ([]DailyReportSummary, error) {
+	if storageDB == nil {
+		return nil, nil
+	}
+
+	rows, err := storageQuery(`
+		SELECT day_key
+		FROM (
+			SELECT DISTINCT day_key FROM watchdog_daily_student_summaries
+			UNION
+			SELECT DISTINCT day_key FROM watchdog_current_users
+		) AS report_days
+		ORDER BY day_key DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	dayKeys := []string{}
+	for rows.Next() {
+		var dayKey string
+		if err := rows.Scan(&dayKey); err != nil {
+			return nil, err
+		}
+		dayKeys = append(dayKeys, dayKey)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	currentDayKey := currentRuntimeDayKey()
+	reports := make([]DailyReportSummary, 0, len(dayKeys))
+	for _, dayKey := range dayKeys {
+		var (
+			users []User
+			err   error
+		)
+		if dayKey == currentDayKey {
+			users, err = loadCurrentUsersForDay(dayKey, true)
+		} else {
+			users, err = loadHistoricalUsersForDay(dayKey, true)
+		}
+		if err != nil {
+			return nil, err
+		}
+		report, err := buildDailyReportSummary(dayKey, users)
+		if err != nil {
+			return nil, err
+		}
+		report.Live = dayKey == currentDayKey
+		if report.StudentCount == 0 {
+			continue
+		}
+		reports = append(reports, report)
+	}
+
+	return reports, nil
+}
+
+func buildDailyReportSummary(dayKey string, users []User) (DailyReportSummary, error) {
+	report := DailyReportSummary{DayKey: dayKey}
+	postsByLogin, err := loadAttendancePostsForDay(dayKey)
+	if err != nil {
+		return report, err
+	}
+
+	for _, user := range users {
+		if !user.IsApprentice {
+			continue
+		}
+		posts := postsByLogin[normalizeLogin(user.Login42)]
+		PopulateUserPostResult(&user, posts)
+
+		report.StudentCount++
+		if user.PostResult == POSTED || user.PostResult == POST_OFF {
+			report.PostedCount++
+			continue
+		}
+		report.FailedCount++
+	}
+
+	return report, nil
 }
 
 func loadHistoricalLocationDaySummaries(login string) (map[string]StudentAttendanceDaySummary, error) {
@@ -1266,13 +2095,22 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 	}
 
 	rows, err := storageQuery(`
-		SELECT DISTINCT ON (login_42)
-			login_42,
-			is_apprentice,
-			profile,
-			COALESCE(last_access, first_access)
-		FROM watchdog_daily_student_summaries
-		ORDER BY login_42, COALESCE(last_access, first_access) DESC NULLS LAST, day_key DESC
+		SELECT DISTINCT ON (summaries.login_42)
+			summaries.login_42,
+			summaries.is_apprentice,
+			summaries.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			COALESCE(summaries.last_access, summaries.first_access),
+			summaries.retained_duration_seconds,
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_daily_student_summaries AS summaries
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = summaries.login_42
+		ORDER BY summaries.login_42, COALESCE(summaries.last_access, summaries.first_access) DESC NULLS LAST, summaries.day_key DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -1284,12 +2122,22 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 		var user AdminUserSummary
 		var isApprentice int
 		var profile int
+		var statusOverridden int
 		var lastBadgeAt sql.NullString
-		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &lastBadgeAt); err != nil {
+		var durationSeconds int64
+		var isBlacklisted int
+		var badgePostingOff int
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
 			return nil, err
 		}
 		user.IsApprentice = isApprentice == 1
 		user.Profile = ProfileType(profile)
+		user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+		user.StatusOverridden = statusOverridden == 1
+		user.IsBlacklisted = isBlacklisted == 1
+		user.BadgePostingOff = badgePostingOff == 1
+		user.DayDuration = time.Duration(durationSeconds) * time.Second
 		if lastBadgeAt.Valid {
 			user.LastBadgeAt, err = time.Parse(time.RFC3339Nano, lastBadgeAt.String)
 			if err != nil {
@@ -1306,15 +2154,105 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 		return nil, nil
 	}
 
+	dayKey := currentRuntimeDayKey()
 	rows, err := storageQuery(`
-		SELECT DISTINCT ON (login_42)
-			login_42,
-			is_apprentice,
-			profile,
-			COALESCE(last_access, first_access)
-		FROM watchdog_current_users
-		WHERE day_key = ? AND COALESCE(last_access, first_access) IS NOT NULL
-		ORDER BY login_42, COALESCE(last_access, first_access) DESC NULLS LAST, updated_at DESC
+		SELECT DISTINCT ON (current_users.login_42)
+			current_users.login_42,
+			current_users.is_apprentice,
+			current_users.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			current_users.first_access,
+			COALESCE(current_users.last_access, current_users.first_access),
+			current_users.duration_seconds,
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_current_users AS current_users
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = current_users.login_42
+		WHERE current_users.day_key = ? AND COALESCE(current_users.last_access, current_users.first_access) IS NOT NULL
+		ORDER BY current_users.login_42, COALESCE(current_users.last_access, current_users.first_access) DESC NULLS LAST, current_users.updated_at DESC
+	`, dayKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []AdminUserSummary
+	for rows.Next() {
+		var user AdminUserSummary
+		var isApprentice int
+		var profile int
+		var statusOverridden int
+		var firstAccess sql.NullString
+		var lastBadgeAt sql.NullString
+		var durationSeconds int64
+		var isBlacklisted int
+		var badgePostingOff int
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
+			return nil, err
+		}
+		user.IsApprentice = isApprentice == 1
+		user.Profile = ProfileType(profile)
+		user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+		user.StatusOverridden = statusOverridden == 1
+		user.IsBlacklisted = isBlacklisted == 1
+		user.BadgePostingOff = badgePostingOff == 1
+		storedDuration := time.Duration(durationSeconds) * time.Second
+		user.DayDuration = storedDuration
+
+		var firstAccessTime time.Time
+		if firstAccess.Valid {
+			firstAccessTime, err = time.Parse(time.RFC3339Nano, firstAccess.String)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if lastBadgeAt.Valid {
+			user.LastBadgeAt, err = time.Parse(time.RFC3339Nano, lastBadgeAt.String)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		badgeEvents, err := loadBadgeEventsForLogin(dayKey, user.Login42)
+		if err != nil {
+			return nil, err
+		}
+		locationSessions, _ := SnapshotDailyLocationSessionsOrSchedule(user.Login42)
+		recalculatedDuration := CombinedRetainedDuration(badgeEvents, firstAccessTime, user.LastBadgeAt, locationSessions)
+		if recalculatedDuration > user.DayDuration {
+			user.DayDuration = recalculatedDuration
+		}
+
+		users = append(users, user)
+	}
+	return users, rows.Err()
+}
+
+func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
+	if storageDB == nil {
+		return nil, nil
+	}
+
+	rows, err := storageQuery(`
+		SELECT
+			profiles.login_42,
+			profiles.is_apprentice,
+			profiles.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_day_profiles AS profiles
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = profiles.login_42
+		WHERE profiles.day_key = ?
 	`, currentRuntimeDayKey())
 	if err != nil {
 		return nil, err
@@ -1326,18 +2264,19 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 		var user AdminUserSummary
 		var isApprentice int
 		var profile int
-		var lastBadgeAt sql.NullString
-		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &lastBadgeAt); err != nil {
+		var statusOverridden int
+		var isBlacklisted int
+		var badgePostingOff int
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
 			return nil, err
 		}
 		user.IsApprentice = isApprentice == 1
 		user.Profile = ProfileType(profile)
-		if lastBadgeAt.Valid {
-			user.LastBadgeAt, err = time.Parse(time.RFC3339Nano, lastBadgeAt.String)
-			if err != nil {
-				return nil, err
-			}
-		}
+		user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+		user.StatusOverridden = statusOverridden == 1
+		user.IsBlacklisted = isBlacklisted == 1
+		user.BadgePostingOff = badgePostingOff == 1
 		users = append(users, user)
 	}
 	return users, rows.Err()
@@ -1370,10 +2309,14 @@ func loadActiveLoginsForDay(dayKey string) (map[string]struct{}, error) {
 			WHERE day_key = ? AND COALESCE(first_access, last_access) IS NOT NULL
 			UNION
 			SELECT DISTINCT login_42
+			FROM watchdog_day_profiles
+			WHERE day_key = ?
+			UNION
+			SELECT DISTINCT login_42
 			FROM watchdog_badge_events
 			WHERE day_key = ?
 		`
-		args = []any{dayKey, dayKey}
+		args = []any{dayKey, dayKey, dayKey}
 	}
 
 	rows, err := storageQuery(query, args...)
@@ -1402,6 +2345,10 @@ func loadAdminUsers(search string, statuses []string, dayKey string) ([]AdminUse
 	if err != nil {
 		return nil, err
 	}
+	currentProfiles, err := loadCurrentAdminDayProfiles()
+	if err != nil {
+		return nil, err
+	}
 
 	search = normalizeLogin(search)
 	requestedStatusFilter := len(statuses) > 0
@@ -1424,8 +2371,11 @@ func loadAdminUsers(search string, statuses []string, dayKey string) ([]AdminUse
 		}
 	}
 
-	usersByLogin := make(map[string]AdminUserSummary, len(historicalUsers)+len(currentUsers))
+	usersByLogin := make(map[string]AdminUserSummary, len(historicalUsers)+len(currentUsers)+len(currentProfiles))
 	for _, user := range historicalUsers {
+		usersByLogin[normalizeLogin(user.Login42)] = user
+	}
+	for _, user := range currentProfiles {
 		usersByLogin[normalizeLogin(user.Login42)] = user
 	}
 	for _, user := range currentUsers {
@@ -1439,7 +2389,7 @@ func loadAdminUsers(search string, statuses []string, dayKey string) ([]AdminUse
 				continue
 			}
 		}
-		status := adminUserStatus(user.IsApprentice, user.Profile)
+		status := coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
 		if search != "" && !strings.Contains(normalizeLogin(user.Login42), search) {
 			continue
 		}
@@ -1606,6 +2556,9 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 	if storageDB == nil {
 		return nil
 	}
+	if err := saveUserIdentity(record.User); err != nil {
+		return err
+	}
 
 	var firstAccess any
 	if !record.User.FirstAccess.IsZero() {
@@ -1623,8 +2576,8 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 	_, err := storageExec(`
 		INSERT INTO watchdog_daily_student_summaries (
 			day_key, login_42, control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, error_message, finalized_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, post_result, error_message, finalized_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day_key, login_42) DO UPDATE SET
 			control_access_id = excluded.control_access_id,
 			control_access_name = excluded.control_access_name,
@@ -1636,6 +2589,7 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 			badge_duration_seconds = excluded.badge_duration_seconds,
 			retained_duration_seconds = excluded.retained_duration_seconds,
 			status = excluded.status,
+			post_result = excluded.post_result,
 			error_message = excluded.error_message,
 			finalized_at = excluded.finalized_at
 	`,
@@ -1651,6 +2605,7 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 		int64(record.BadgeDuration/time.Second),
 		int64(record.RetainedDuration/time.Second),
 		record.User.Status,
+		record.User.PostResult,
 		errorMessage,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
@@ -1672,12 +2627,13 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		badgeSeconds    int64
 		retainedSeconds int64
 		status          sql.NullString
+		postResult      sql.NullString
 		errorMessage    sql.NullString
 	)
 
 	err := storageQueryRow(`
 		SELECT control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, error_message
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, post_result, error_message
 		FROM watchdog_daily_student_summaries
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(
@@ -1691,6 +2647,7 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		&badgeSeconds,
 		&retainedSeconds,
 		&status,
+		&postResult,
 		&errorMessage,
 	)
 	if err == sql.ErrNoRows {
@@ -1705,6 +2662,8 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 	record.User.IsApprentice = isApprentice == 1
 	record.User.Profile = ProfileType(profile)
 	record.User.Status = status.String
+	record.User.PostResult = postResult.String
+	normalizeHistoricalSummaryStatus(&record.User)
 	record.BadgeDuration = time.Duration(badgeSeconds) * time.Second
 	record.RetainedDuration = time.Duration(retainedSeconds) * time.Second
 
@@ -1822,6 +2781,88 @@ func loadAttendancePosts(dayKey, login string) ([]AttendancePostRecord, error) {
 	return out, rows.Err()
 }
 
+func loadAttendancePostsForDay(dayKey string) (map[string][]AttendancePostRecord, error) {
+	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
+		return map[string][]AttendancePostRecord{}, nil
+	}
+
+	rows, err := storageQuery(`
+		SELECT login_42, id_42, control_access_id, begin_at, end_at, payload_json, http_status,
+			response_status, error_message, success, created_at
+		FROM watchdog_attendance_posts
+		WHERE day_key = ?
+		ORDER BY login_42, created_at
+	`, dayKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string][]AttendancePostRecord)
+	for rows.Next() {
+		var record AttendancePostRecord
+		var login string
+		var beginAtRaw sql.NullString
+		var endAtRaw sql.NullString
+		var payloadRaw string
+		var httpStatus sql.NullInt64
+		var responseStatus sql.NullString
+		var errorMessage sql.NullString
+		var success int
+		var createdAtRaw string
+
+		if err := rows.Scan(
+			&login,
+			&record.ID42,
+			&record.ControlAccessID,
+			&beginAtRaw,
+			&endAtRaw,
+			&payloadRaw,
+			&httpStatus,
+			&responseStatus,
+			&errorMessage,
+			&success,
+			&createdAtRaw,
+		); err != nil {
+			return nil, err
+		}
+
+		record.DayKey = dayKey
+		record.Login42 = normalizeLogin(login)
+		record.Success = success == 1
+		record.ResponseStatus = responseStatus.String
+		record.ErrorMessage = errorMessage.String
+		record.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAtRaw)
+		if err != nil {
+			return nil, err
+		}
+		if beginAtRaw.Valid {
+			beginAt, err := time.Parse(time.RFC3339Nano, beginAtRaw.String)
+			if err != nil {
+				return nil, err
+			}
+			record.BeginAt = &beginAt
+		}
+		if endAtRaw.Valid {
+			endAt, err := time.Parse(time.RFC3339Nano, endAtRaw.String)
+			if err != nil {
+				return nil, err
+			}
+			record.EndAt = &endAt
+		}
+		if httpStatus.Valid {
+			status := int(httpStatus.Int64)
+			record.HTTPStatus = &status
+		}
+		if err := json.Unmarshal([]byte(payloadRaw), &record.Payload); err != nil {
+			return nil, err
+		}
+
+		out[record.Login42] = append(out[record.Login42], record)
+	}
+	return out, rows.Err()
+}
+
 func markDayFinalized(dayKey string) error {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return nil
@@ -1858,7 +2899,7 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 	if err != nil {
 		return err
 	}
-	currentUsers, err := loadCurrentUsersForDay(dayKey)
+	currentUsers, err := loadCurrentUsersForDay(dayKey, false)
 	if err != nil {
 		return err
 	}
@@ -1898,6 +2939,11 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 			continue
 		}
 		user.Login42 = login
+		attendancePosts, err := loadAttendancePosts(dayKey, login)
+		if err != nil {
+			return err
+		}
+		PopulateUserPostResult(&user, attendancePosts)
 
 		locationSessions, err := fetchLocationSessionsForDay(login, dayKey)
 		if err != nil {
@@ -1968,7 +3014,7 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 
 func CurrentUsers() ([]User, error) {
 	ensureRuntimeDayState()
-	return loadCurrentUsersForDay(currentRuntimeDayKey())
+	return loadCurrentUsersForDay(currentRuntimeDayKey(), false)
 }
 
 func CurrentUserByLogin(login string) (User, bool, error) {
@@ -1981,13 +3027,13 @@ func CurrentBadgeEvents(login string) ([]BadgeEvent, error) {
 	return loadBadgeEventsForLogin(currentRuntimeDayKey(), login)
 }
 
-func UsersForDay(dayKey string) ([]User, bool, error) {
+func UsersForDay(dayKey string, apprenticesOnly bool) ([]User, bool, error) {
 	ensureRuntimeDayState()
 	if strings.TrimSpace(dayKey) == "" || dayKey == currentRuntimeDayKey() {
-		users, err := loadCurrentUsersForDay(currentRuntimeDayKey())
+		users, err := loadCurrentUsersForDay(currentRuntimeDayKey(), apprenticesOnly)
 		return users, true, err
 	}
-	users, err := loadHistoricalUsersForDay(dayKey)
+	users, err := loadHistoricalUsersForDay(dayKey, apprenticesOnly)
 	return users, false, err
 }
 
@@ -2004,6 +3050,16 @@ func AttendanceDaysForLogin(login, monthKey string) ([]StudentAttendanceDaySumma
 func AdminUsers(search string, statuses []string, dayKey string) ([]AdminUserSummary, error) {
 	ensureRuntimeDayState()
 	return loadAdminUsers(search, statuses, dayKey)
+}
+
+func AttendancePostsForDay(dayKey string) (map[string][]AttendancePostRecord, error) {
+	ensureRuntimeDayState()
+	return loadAttendancePostsForDay(dayKey)
+}
+
+func DailyReportSummaries() ([]DailyReportSummary, error) {
+	ensureRuntimeDayState()
+	return loadDailyReportSummaries()
 }
 
 func AdminUserByLogin(login string) (AdminUserSummary, bool, error) {
@@ -2031,19 +3087,144 @@ func normalizeAdminUserStatus(status string) string {
 		return "apprentice"
 	case "pisciner", "piscineux":
 		return "pisciner"
+	case "staff":
+		return "staff"
+	case "extern", "externe":
+		return "extern"
 	default:
 		return ""
 	}
 }
 
+func AdminUserStatusFromInput(status string) string {
+	return normalizeManagedUserStatus(status)
+}
+
 func adminUserStatus(isApprentice bool, profile ProfileType) string {
+	return statusFromSignals(isApprentice, profile)
+}
+
+func AdminUserStatus(isApprentice bool, profile ProfileType) string {
+	return adminUserStatus(isApprentice, profile)
+}
+
+func statusLabel(isApprentice bool) string {
+	return statusFromSignals(isApprentice, Student)
+}
+
+func normalizeManagedUserStatus(status string) string {
+	return normalizeAdminUserStatus(status)
+}
+
+func coalesceManagedStatus(values ...string) string {
+	for _, value := range values {
+		if normalized := normalizeManagedUserStatus(value); normalized != "" {
+			return normalized
+		}
+	}
+	return "student"
+}
+
+func normalizeHistoricalSummaryStatus(user *User) {
+	if user == nil {
+		return
+	}
+	if normalizeManagedUserStatus(user.Status) != "" {
+		return
+	}
+	if strings.TrimSpace(user.PostResult) == "" {
+		user.PostResult = strings.TrimSpace(user.Status)
+	}
+	user.Status = statusFromSignals(user.IsApprentice, user.Profile)
+}
+
+func PopulateUserPostResult(user *User, posts []AttendancePostRecord) {
+	if user == nil {
+		return
+	}
+
+	user.PostResult = ""
+	user.Error = nil
+
+	if len(posts) > 0 {
+		last := posts[len(posts)-1]
+		if last.Success {
+			user.PostResult = POSTED
+			return
+		}
+
+		errorMessage := strings.TrimSpace(last.ErrorMessage)
+		switch errorMessage {
+		case "AUTOPOST is off":
+			user.PostResult = POST_OFF
+		case "user is blacklisted":
+			user.PostResult = POST_SKIPPED_BLACKLIST
+		case "badge posting is disabled":
+			user.PostResult = POST_SKIPPED_DISABLED
+		default:
+			user.PostResult = POST_ERROR
+		}
+
+		if errorMessage != "" {
+			user.Error = fmt.Errorf("%s", errorMessage)
+		} else if strings.TrimSpace(last.ResponseStatus) != "" {
+			user.Error = fmt.Errorf("%s", strings.TrimSpace(last.ResponseStatus))
+		}
+		return
+	}
+
+	if user.FirstAccess.IsZero() {
+		if user.IsApprentice {
+			user.PostResult = APPRENTICE_NO_BADGE
+		} else {
+			user.PostResult = NO_BADGE
+		}
+		return
+	}
+
+	if user.FirstAccess.Equal(user.LastAccess) {
+		if user.IsApprentice {
+			user.PostResult = APPRENTICE_BADGED_ONCE
+		} else {
+			user.PostResult = BADGED_ONCE
+		}
+		return
+	}
+
+	if !user.IsApprentice {
+		user.PostResult = NOT_APPRENTICE
+	}
+}
+
+func statusFromSignals(isApprentice bool, profile ProfileType) string {
 	if isApprentice {
 		return "apprentice"
 	}
-	if profile == Pisciner {
+	switch profile {
+	case Pisciner:
 		return "pisciner"
+	case Staff:
+		return "staff"
+	case Student:
+		return "student"
+	default:
+		return "extern"
 	}
-	return "student"
+}
+
+func signalsFromStatus(status string) (bool, ProfileType) {
+	switch normalizeManagedUserStatus(status) {
+	case "apprentice":
+		return true, Student
+	case "pisciner":
+		return false, Pisciner
+	case "staff":
+		return false, Staff
+	case "extern":
+		return false, 0
+	default:
+		return false, Student
+	}
 }
 
 func boolToInt(value bool) int {

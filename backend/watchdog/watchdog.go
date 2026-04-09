@@ -247,12 +247,15 @@ func CreateNewUser(userID int, accessControlUsername string) (User, int, error) 
 		return user, badgeID, nil
 	}
 
-	user.IsApprentice = false
-	for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
-		if isProjectOngoing(user.Login42, projectID) {
-			user.IsApprentice = true
-			break
-		}
+	if state, ok, err := loadStudentStatusState(user.Login42); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load cached status for %s: %v", user.Login42, err))
+	} else if ok {
+		user.IsApprentice = state.IsApprentice
+	}
+	if settings, ok, err := loadUserSettings(user.Login42); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load settings for %s: %v", user.Login42, err))
+	} else if ok {
+		applyUserSettings(&user, settings)
 	}
 	if user.IsApprentice && user.Profile != Student {
 		Log(fmt.Sprintf("[WATCHDOG] ⚠️  Created a new user: %s is an apprentice with temporary badge", user.Login42))
@@ -315,6 +318,8 @@ func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.T
 			}
 		}
 	}
+
+	refreshStudentStatusOnFirstBadge(&user, timeStamp)
 
 	if err := saveDayProfile(dayKey, user); err != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist day profile for %s: %v", user.Login42, err))
@@ -435,32 +440,6 @@ func printUserGroup(title string, users []User, showTimes bool, loc *time.Locati
 	}
 }
 
-func isProjectOngoing(login string, projectID string) bool {
-	resp, err := apiManager.GetClient(config.FTv2).Get(fmt.Sprintf("/users/%s/projects/%s/teams?sort=-created_at", login, projectID))
-	if err != nil {
-		Log(fmt.Sprintf("[WATCHDOG] ERROR: %s\n", err.Error()))
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-
-	respBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		Log(fmt.Sprintf("[WATCHDOG] ERROR: %s\n", err.Error()))
-		return false
-	}
-
-	var res []ProjectResponse
-	err = json.Unmarshal(respBytes, &res)
-	if err != nil {
-		Log(fmt.Sprintf("[WATCHDOG] ERROR: %s", err.Error()))
-		os.Exit(1)
-	}
-	return len(res) >= 1 && res[0].Status == "in_progress"
-}
-
 type APIAttendance struct {
 	Begin_at  string `json:"begin_at"`
 	End_at    string `json:"end_at"`
@@ -496,9 +475,20 @@ func buildAttendancePayload(user User) (APIAttendance, error) {
 }
 
 func postAttendanceForUser(user *User) {
+	switch userPostBlockedReason(*user) {
+	case "blacklisted":
+		user.PostResult = POST_SKIPPED_BLACKLIST
+		user.Error = fmt.Errorf("user is blacklisted")
+		return
+	case "disabled":
+		user.PostResult = POST_SKIPPED_DISABLED
+		user.Error = fmt.Errorf("badge posting is disabled")
+		return
+	}
+
 	payload, err := buildAttendancePayload(*user)
 	if err != nil {
-		user.Status = POST_ERROR
+		user.PostResult = POST_ERROR
 		user.Error = err
 		return
 	}
@@ -509,7 +499,7 @@ func postAttendanceForUser(user *User) {
 	}
 
 	if !config.ConfigData.Attendance42.AutoPost {
-		user.Status = POST_OFF
+		user.PostResult = POST_OFF
 		user.Error = fmt.Errorf("AUTOPOST is off")
 		if err := recordAttendancePost(dayKey, *user, payload, nil, "", user.Error.Error(), false); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
@@ -519,7 +509,7 @@ func postAttendanceForUser(user *User) {
 
 	resp, err := apiManager.GetClient(config.FTAttendance).Post("/attendances", payload)
 	if err != nil {
-		user.Status = POST_ERROR
+		user.PostResult = POST_ERROR
 		user.Error = err
 		if persistErr := recordAttendancePost(dayKey, *user, payload, nil, "", user.Error.Error(), false); persistErr != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, persistErr))
@@ -530,7 +520,7 @@ func postAttendanceForUser(user *User) {
 
 	statusCode := resp.StatusCode
 	if resp.StatusCode != http.StatusOK {
-		user.Status = POST_ERROR
+		user.PostResult = POST_ERROR
 		user.Error = fmt.Errorf("%s", resp.Status)
 		if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, user.Error.Error(), false); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
@@ -538,7 +528,7 @@ func postAttendanceForUser(user *User) {
 		return
 	}
 
-	user.Status = POSTED
+	user.PostResult = POSTED
 	user.Error = nil
 	if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, "", true); err != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
@@ -555,7 +545,7 @@ func formatPostInfo(user User, loc *time.Location, msg string) string {
 		last = user.LastAccess.In(loc).Format("15:04:05")
 	}
 	emoji := "✅"
-	if user.Status != POSTED {
+	if user.PostResult != POSTED {
 		emoji = "❌"
 	}
 	return fmt.Sprintf(
@@ -582,28 +572,28 @@ func SinglePostApprentice(user User) {
 	parisLoc, _ := time.LoadLocation("Europe/Paris")
 	defer func() {
 		resetUserDuration(user)
-		Log(formatPostInfo(user, parisLoc, user.Status))
+		Log(formatPostInfo(user, parisLoc, user.PostResult))
 	}()
 	if user.FirstAccess.IsZero() {
 		if user.IsApprentice {
-			user.Status = APPRENTICE_NO_BADGE
+			user.PostResult = APPRENTICE_NO_BADGE
 		} else {
-			user.Status = NO_BADGE
+			user.PostResult = NO_BADGE
 		}
 		return
 	}
 
 	if user.FirstAccess.Equal(user.LastAccess) {
 		if user.IsApprentice {
-			user.Status = APPRENTICE_BADGED_ONCE
+			user.PostResult = APPRENTICE_BADGED_ONCE
 		} else {
-			user.Status = BADGED_ONCE
+			user.PostResult = BADGED_ONCE
 		}
 		return
 	}
 
 	if !user.IsApprentice {
-		user.Status = NOT_APPRENTICE
+		user.PostResult = NOT_APPRENTICE
 		return
 	}
 
@@ -628,11 +618,11 @@ func postApprenticesAttendancesLocked() {
 	for _, user := range users {
 		if user.FirstAccess.IsZero() {
 			if user.IsApprentice {
-				user.Status = APPRENTICE_NO_BADGE
+				user.PostResult = APPRENTICE_NO_BADGE
 			} else {
-				user.Status = NO_BADGE
+				user.PostResult = NO_BADGE
 			}
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			sortedUser[user.PostResult] = append(sortedUser[user.PostResult], user)
 			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
@@ -640,25 +630,25 @@ func postApprenticesAttendancesLocked() {
 
 		if user.FirstAccess.Equal(user.LastAccess) {
 			if user.IsApprentice {
-				user.Status = APPRENTICE_BADGED_ONCE
+				user.PostResult = APPRENTICE_BADGED_ONCE
 			} else {
-				user.Status = BADGED_ONCE
+				user.PostResult = BADGED_ONCE
 			}
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			sortedUser[user.PostResult] = append(sortedUser[user.PostResult], user)
 			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
 		}
 
 		if !user.IsApprentice {
-			user.Status = NOT_APPRENTICE
-			sortedUser[user.Status] = append(sortedUser[user.Status], user)
+			user.PostResult = NOT_APPRENTICE
+			sortedUser[user.PostResult] = append(sortedUser[user.PostResult], user)
 			processedUsers = append(processedUsers, user)
 			resetUserDuration(user)
 			continue
 		}
 		postAttendanceForUser(&user)
-		sortedUser[user.Status] = append(sortedUser[user.Status], user)
+		sortedUser[user.PostResult] = append(sortedUser[user.PostResult], user)
 		processedUsers = append(processedUsers, user)
 		resetUserDuration(user)
 	}
@@ -711,7 +701,7 @@ func postApprenticesAttendancesLocked() {
 	if len(sortedUser[POSTED]) > 0 {
 		Log("[WATCHDOG] [POST] ├──────── Apprentices: Posts")
 		for _, user := range sortedUser[POSTED] {
-			Log(formatPostInfo(user, parisLoc, user.Status))
+			Log(formatPostInfo(user, parisLoc, user.PostResult))
 			addLogToMail(&htmlBody, user, parisLoc)
 		}
 		htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
@@ -721,10 +711,19 @@ func postApprenticesAttendancesLocked() {
 	if len(sortedUser[POST_OFF]) > 0 {
 		Log("[WATCHDOG] [POST] ├──────── Apprentices: Posts (off)")
 		for _, user := range sortedUser[POST_OFF] {
-			Log(formatPostInfo(user, parisLoc, user.Status))
+			Log(formatPostInfo(user, parisLoc, user.PostResult))
 			addLogToMail(&htmlBody, user, parisLoc)
 		}
 		htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
+	}
+
+	if len(sortedUser[POST_SKIPPED_BLACKLIST]) > 0 {
+		Log("[WATCHDOG] [POST] ├──────── Apprentices: Blacklisted")
+		for _, user := range sortedUser[POST_SKIPPED_BLACKLIST] {
+			Log(formatPostInfo(user, parisLoc, "Apprentice is blacklisted"))
+			addLogToMail(&htmlBody, user, parisLoc)
+		}
+		atLeastOneField = true
 	}
 
 	if len(sortedUser[POST_ERROR]) > 0 {
@@ -774,9 +773,12 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 	durationColor := "green"
 	emoji := "✅"
 
-	msg := user.Status
+	msg := user.PostResult
 	if user.Error != nil {
 		msg = user.Error.Error()
+	}
+	if user.PostResult == POST_SKIPPED_BLACKLIST {
+		msg = "Apprentice is blacklisted"
 	}
 
 	first := user.FirstAccess.In(loc)
@@ -805,7 +807,7 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 		durationColor = "orange"
 	}
 
-	if user.Status != POSTED && user.Status != POST_OFF {
+	if user.PostResult != POSTED && user.PostResult != POST_OFF {
 		color = "red"
 		firstColor = "red"
 		lastColor = "red"
@@ -881,13 +883,37 @@ func UpdateStudent(login string, status bool) {
 	stateMutationMutex.Lock()
 	defer stateMutationMutex.Unlock()
 
+	forcedStatus := "student"
+	if status {
+		forcedStatus = "apprentice"
+	}
+	settings, ok, err := loadUserSettings(login)
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load settings for %s before update: %v", login, err))
+		return
+	}
+	if !ok {
+		settings = UserSettings{
+			Login42:  normalizeLogin(login),
+			Status42: "student",
+		}
+	}
+	settings.Status = forcedStatus
+	settings.StatusOverridden = true
+	if err := saveUserSettings(settings); err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist manual status for %s: %v", login, err))
+		return
+	}
+
 	user, ok, err := CurrentUserByLogin(login)
 	if err != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load user %s before update: %v", login, err))
 		return
 	}
 	if ok {
-		user.IsApprentice = status
+		user.IsApprentice, user.Profile = signalsFromStatus(forcedStatus)
+		user.Status = forcedStatus
+		user.StatusOverridden = true
 		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist updated profile for %s: %v", user.Login42, err))
 		}
@@ -912,13 +938,33 @@ func RefetchStudent(login string) {
 	}
 	if ok {
 		oldStatus := user.IsApprentice
-		user.IsApprentice = false
-		for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
-			if isProjectOngoing(user.Login42, projectID) {
-				user.IsApprentice = true
-				break
+		nextStatus, fetchErr := fetchApprenticeStatus(user.Login42)
+		if fetchErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refetch status for %s: %v", user.Login42, fetchErr))
+			if err := saveStudentStatusState(user.Login42, user.IsApprentice, time.Now(), nil); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetch TTL for %s: %v", user.Login42, err))
 			}
+			return
 		}
+		if oldStatus != nextStatus {
+			Log(fmt.Sprintf("[WATCHDOG] Detected a new status for %s: %s -> %s", user.Login42, statusLabel(oldStatus), statusLabel(nextStatus)))
+		}
+		if err := saveStudentStatusState(user.Login42, nextStatus, time.Now(), &oldStatus); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched status for %s: %v", user.Login42, err))
+		}
+		previousDetected := coalesceManagedStatus(user.Status42, statusFromSignals(oldStatus, user.Profile))
+		nextDetected := statusFromSignals(nextStatus, user.Profile)
+		user.Status42 = nextDetected
+		if user.StatusOverridden {
+			if previousDetected != nextDetected {
+				user.Status = nextDetected
+				user.IsApprentice, user.Profile = signalsFromStatus(nextDetected)
+			}
+			Log(fmt.Sprintf("[WATCHDOG] 🔄 Refetched status_42 for %s: %s -> %s", user.Login42, previousDetected, nextDetected))
+			return
+		}
+		user.IsApprentice = nextStatus
+		user.Status = user.Status42
 		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched profile for %s: %v", user.Login42, err))
 		}
@@ -946,21 +992,38 @@ func RefetchAllStudents() {
 
 	for _, user := range users {
 		oldStatus := user.IsApprentice
-		user.IsApprentice = false
-		for _, projectID := range config.ConfigData.ApiV2.ApprenticeProjects {
-			if isProjectOngoing(user.Login42, projectID) {
-				user.IsApprentice = true
-				break
+		nextStatus, fetchErr := fetchApprenticeStatus(user.Login42)
+		if fetchErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refetch status for %s: %v", user.Login42, fetchErr))
+			if err := saveStudentStatusState(user.Login42, user.IsApprentice, time.Now(), nil); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetch TTL for %s: %v", user.Login42, err))
 			}
+			continue
 		}
+		if err := saveStudentStatusState(user.Login42, nextStatus, time.Now(), &oldStatus); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched status for %s: %v", user.Login42, err))
+		}
+		previousDetected := coalesceManagedStatus(user.Status42, statusFromSignals(oldStatus, user.Profile))
+		nextDetected := statusFromSignals(nextStatus, user.Profile)
+		user.Status42 = nextDetected
+		if user.StatusOverridden {
+			if previousDetected != nextDetected {
+				user.Status = nextDetected
+				user.IsApprentice, user.Profile = signalsFromStatus(nextDetected)
+			}
+			continue
+		}
+		user.IsApprentice = nextStatus
+		user.Status = user.Status42
 		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched profile for %s: %v", user.Login42, err))
 		}
 		if err := saveCurrentUser(currentRuntimeDayKey(), user); err != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refetched user for %s: %v", user.Login42, err))
 		}
-		if oldStatus != user.IsApprentice {
-			Log(fmt.Sprintf("[WATCHDOG] 🔄 Updated %s: %t → %t", user.Login42, oldStatus, user.IsApprentice))
+		if oldStatus != nextStatus {
+			Log(fmt.Sprintf("[WATCHDOG] Detected a new status for %s: %s -> %s", user.Login42, statusLabel(oldStatus), statusLabel(nextStatus)))
+			Log(fmt.Sprintf("[WATCHDOG] 🔄 Updated %s: %t → %t", user.Login42, oldStatus, nextStatus))
 		}
 	}
 

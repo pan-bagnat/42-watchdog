@@ -115,8 +115,9 @@ func InitAPIs() error {
 	Log("[WATCHDOG] ├── ⏱️  Initializing 42 Chronos API")
 	err = init42AttendanceAPI()
 	if err != nil {
-		Log(fmt.Sprintf("ERROR: %s\n", err.Error()))
-		os.Exit(1)
+		config.ConfigData.Attendance42.AutoPost = false
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: %s", err.Error()))
+		Log("[WATCHDOG] WARNING: attendance posting disabled for this runtime because Chronos is unavailable")
 	}
 	Log("[WATCHDOG] ├─ 🛠️  Initializing Other Services")
 	Log("[WATCHDOG] ├── ✉️  Initializing Mailer")

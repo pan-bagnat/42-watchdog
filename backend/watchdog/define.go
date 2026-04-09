@@ -12,11 +12,13 @@ const (
 	BADGED_ONCE    string = "User badge only once"
 	NOT_APPRENTICE string = "User is not an apprentice"
 
-	APPRENTICE_NO_BADGE    string = "Apprentice didn't badged usage yet"
+	APPRENTICE_NO_BADGE    string = "Apprentice didn't badged today"
 	APPRENTICE_BADGED_ONCE string = "Apprentice badged only once"
 	POSTED                 string = "Posted"
 	POST_ERROR             string = "Post returned an error"
 	POST_OFF               string = "AUTOPOST is off"
+	POST_SKIPPED_BLACKLIST string = "Skipped because user is blacklisted"
+	POST_SKIPPED_DISABLED  string = "Skipped because badge posting is disabled"
 )
 
 type User struct {
@@ -25,12 +27,18 @@ type User struct {
 	Login42           string        `json:"login_42"`
 	ID42              string        `json:"id_42"`
 	IsApprentice      bool          `json:"is_apprentice"`
+	IsBlacklisted     bool          `json:"is_blacklisted"`
+	BadgePostingOff   bool          `json:"badge_posting_off"`
+	BlacklistReason   string        `json:"blacklist_reason"`
+	Status            string        `json:"status"`
+	PostResult        string        `json:"post_result"`
+	Status42          string        `json:"status_42"`
+	StatusOverridden  bool          `json:"status_overridden"`
 	FirstAccess       time.Time     `json:"first_access"`
 	LastAccess        time.Time     `json:"last_access"`
 	Duration          time.Duration `json:"duration"`
 	Profile           ProfileType
 	Error             error
-	Status            string
 }
 
 type ProjectResponse struct {

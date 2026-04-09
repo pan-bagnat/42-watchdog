@@ -10,17 +10,25 @@ import (
 )
 
 type apiUserState struct {
-	ControlAccessID   int        `json:"control_access_id"`
-	ControlAccessName string     `json:"control_access_name"`
-	Login42           string     `json:"login_42"`
-	ID42              string     `json:"id_42"`
-	IsApprentice      bool       `json:"is_apprentice"`
-	Profile           string     `json:"profile"`
-	FirstAccess       *time.Time `json:"first_access,omitempty"`
-	LastAccess        *time.Time `json:"last_access,omitempty"`
-	DurationSeconds   int64      `json:"duration_seconds"`
-	DurationHuman     string     `json:"duration_human"`
-	Status            string     `json:"status,omitempty"`
+	ControlAccessID   int                 `json:"control_access_id"`
+	ControlAccessName string              `json:"control_access_name"`
+	Login42           string              `json:"login_42"`
+	ID42              string              `json:"id_42"`
+	IsApprentice      bool                `json:"is_apprentice"`
+	Status            string              `json:"status"`
+	PostResult        string              `json:"post_result,omitempty"`
+	Status42          string              `json:"status_42"`
+	StatusOverridden  bool                `json:"status_overridden"`
+	IsBlacklisted     bool                `json:"is_blacklisted"`
+	BadgePostingOff   bool                `json:"badge_posting_off"`
+	BlacklistReason   string              `json:"blacklist_reason,omitempty"`
+	Profile           string              `json:"profile"`
+	FirstAccess       *time.Time          `json:"first_access,omitempty"`
+	LastAccess        *time.Time          `json:"last_access,omitempty"`
+	DurationSeconds   int64               `json:"duration_seconds"`
+	DurationHuman     string              `json:"duration_human"`
+	ErrorMessage      string              `json:"error_message,omitempty"`
+	AttendancePosts   []apiAttendancePost `json:"attendance_posts,omitempty"`
 }
 
 type apiBadgeEvent struct {
@@ -60,8 +68,10 @@ type apiStudentMeResponse struct {
 }
 
 type apiStudentUpdateRequest struct {
-	IsApprentice *bool `json:"is_apprentice,omitempty"`
-	Refetch      bool  `json:"refetch,omitempty"`
+	Status           *string `json:"status,omitempty"`
+	StatusOverridden *bool   `json:"status_overridden,omitempty"`
+	IsBlacklisted    *bool   `json:"is_blacklisted,omitempty"`
+	BlacklistReason  *string `json:"blacklist_reason,omitempty"`
 }
 
 type apiMessageResponse struct {
@@ -90,11 +100,26 @@ type apiAdminStudentDay struct {
 	Loading         bool       `json:"loading,omitempty"`
 }
 
+type apiAdminReportSummary struct {
+	Day          string `json:"day"`
+	StudentCount int    `json:"student_count"`
+	PostedCount  int    `json:"posted_count"`
+	FailedCount  int    `json:"failed_count"`
+	Live         bool   `json:"live"`
+}
+
 type apiAdminUserListItem struct {
-	Login42     string     `json:"login_42"`
-	PhotoURL    string     `json:"photo_url,omitempty"`
-	Status      string     `json:"status"`
-	LastBadgeAt *time.Time `json:"last_badge_at,omitempty"`
+	Login42                     string     `json:"login_42"`
+	PhotoURL                    string     `json:"photo_url,omitempty"`
+	Status                      string     `json:"status"`
+	Status42                    string     `json:"status_42"`
+	StatusOverridden            bool       `json:"status_overridden"`
+	IsBlacklisted               bool       `json:"is_blacklisted"`
+	BadgePostingOff             bool       `json:"badge_posting_off"`
+	BlacklistReason             string     `json:"blacklist_reason,omitempty"`
+	LastBadgeAt                 *time.Time `json:"last_badge_at,omitempty"`
+	LastBadgeDayDurationSeconds int64      `json:"last_badge_day_duration_seconds"`
+	LastBadgeDayDurationHuman   string     `json:"last_badge_day_duration_human"`
 }
 
 type apiAdminUserDetailResponse struct {
@@ -103,11 +128,6 @@ type apiAdminUserDetailResponse struct {
 }
 
 func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	authUser := getAuthenticatedUser(r)
 	if authUser == nil {
 		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
@@ -120,54 +140,76 @@ func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	monthKey, err := requestedMonthKey(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_month", "month must use YYYY-MM format.")
-		return
-	}
-
-	days, err := watchdog.AttendanceDaysForLogin(login, monthKey)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "student_days_load_failed", "Could not load student days.")
-		return
-	}
-
-	user, ok, err := watchdog.AdminUserByLogin(login)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load student.")
-		return
-	}
-
-	payload := apiAdminUserDetailResponse{
-		apiAdminUserListItem: apiAdminUserListItem{
-			Login42:  login,
-			PhotoURL: strings.TrimSpace(authUser.PhotoURL),
-			Status:   "student",
-		},
-		Days: make([]apiAdminStudentDay, 0, len(days)),
-	}
-
-	if ok {
-		payload.apiAdminUserListItem = mapAdminUser(user)
-		if payload.PhotoURL == "" {
-			payload.PhotoURL = strings.TrimSpace(authUser.PhotoURL)
+	switch r.Method {
+	case http.MethodGet:
+		monthKey, err := requestedMonthKey(r)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_month", "month must use YYYY-MM format.")
+			return
 		}
-	}
 
-	for _, day := range days {
-		payload.Days = append(payload.Days, apiAdminStudentDay{
-			Day:             day.DayKey,
-			Live:            day.Live,
-			FirstAccess:     timePtr(day.FirstAccess),
-			LastAccess:      timePtr(day.LastAccess),
-			DurationSeconds: int64(day.Duration / time.Second),
-			DurationHuman:   day.Duration.String(),
-			Status:          day.Status,
-			Loading:         day.Loading,
-		})
-	}
+		days, err := watchdog.AttendanceDaysForLogin(login, monthKey)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "student_days_load_failed", "Could not load student days.")
+			return
+		}
 
-	writeJSON(w, http.StatusOK, payload)
+		user, ok, err := watchdog.AdminUserByLogin(login)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load student.")
+			return
+		}
+
+		payload := apiAdminUserDetailResponse{
+			apiAdminUserListItem: apiAdminUserListItem{
+				Login42:          login,
+				PhotoURL:         strings.TrimSpace(authUser.PhotoURL),
+				Status:           "student",
+				Status42:         "student",
+				StatusOverridden: false,
+				IsBlacklisted:    false,
+				BadgePostingOff:  false,
+			},
+			Days: make([]apiAdminStudentDay, 0, len(days)),
+		}
+
+		if ok {
+			payload.apiAdminUserListItem = mapAdminUser(user)
+			if payload.PhotoURL == "" {
+				payload.PhotoURL = strings.TrimSpace(authUser.PhotoURL)
+			}
+		} else if settings, settingsOK, settingsErr := watchdog.UserSettingsByLogin(login); settingsErr == nil && settingsOK {
+			if settings.Status != "" {
+				payload.Status = settings.Status
+			}
+			if settings.Status42 != "" {
+				payload.Status42 = settings.Status42
+			}
+			payload.StatusOverridden = settings.StatusOverridden
+			payload.IsBlacklisted = settings.IsBlacklisted
+			payload.BadgePostingOff = settings.BadgePostingOff
+			payload.BlacklistReason = settings.BlacklistReason
+		}
+
+		for _, day := range days {
+			payload.Days = append(payload.Days, apiAdminStudentDay{
+				Day:             day.DayKey,
+				Live:            day.Live,
+				FirstAccess:     timePtr(day.FirstAccess),
+				LastAccess:      timePtr(day.LastAccess),
+				DurationSeconds: int64(day.Duration / time.Second),
+				DurationHuman:   day.Duration.String(),
+				Status:          day.Status,
+				Loading:         day.Loading,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, payload)
+	case http.MethodPatch:
+		writeJSONError(w, http.StatusForbidden, "forbidden_patch", "Self-service badgeuse settings are disabled.")
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func adminStudentsHandler(w http.ResponseWriter, r *http.Request) {
@@ -178,12 +220,26 @@ func adminStudentsHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid_date", "date must use YYYY-MM-DD format.")
 			return
 		}
-		users, _, err := watchdog.UsersForDay(dayKey)
+		apprenticesOnly := false
+		if raw := strings.TrimSpace(r.URL.Query().Get("apprentices_only")); raw != "" {
+			parsed, parseErr := strconv.ParseBool(raw)
+			if parseErr != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid_apprentices_only", "apprentices_only must be a boolean.")
+				return
+			}
+			apprenticesOnly = parsed
+		}
+		users, _, err := watchdog.UsersForDay(dayKey, apprenticesOnly)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "students_load_failed", "Could not load watchdog state.")
 			return
 		}
-		writeJSON(w, http.StatusOK, mapUsers(users))
+		postsByLogin, err := watchdog.AttendancePostsForDay(dayKey)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "students_load_failed", "Could not load attendance posts.")
+			return
+		}
+		writeJSON(w, http.StatusOK, mapUsersWithAttendancePosts(users, postsByLogin))
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -219,40 +275,85 @@ func adminUsersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func adminUserDetailHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	login := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/users/"))
 	if login == "" || strings.Contains(login, "/") {
 		http.NotFound(w, r)
 		return
 	}
 
-	user, ok, err := watchdog.AdminUserByLogin(login)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "user_load_failed", "Could not load admin user.")
-		return
-	}
-	if !ok {
-		writeJSONError(w, http.StatusNotFound, "user_not_found", "User not found.")
-		return
-	}
+	switch r.Method {
+	case http.MethodGet:
+		user, ok, err := watchdog.AdminUserByLogin(login)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "user_load_failed", "Could not load admin user.")
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "user_not_found", "User not found.")
+			return
+		}
 
-	monthKey, err := requestedMonthKey(r)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_month", "month must use YYYY-MM format.")
-		return
-	}
+		monthKey, err := requestedMonthKey(r)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_month", "month must use YYYY-MM format.")
+			return
+		}
 
-	days, err := watchdog.AttendanceDaysForLogin(login, monthKey)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "user_days_load_failed", "Could not load user attendance days.")
-		return
-	}
+		days, err := watchdog.AttendanceDaysForLogin(login, monthKey)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "user_days_load_failed", "Could not load user attendance days.")
+			return
+		}
 
-	writeJSON(w, http.StatusOK, mapAdminUserDetail(user, days))
+		writeJSON(w, http.StatusOK, mapAdminUserDetail(user, days))
+	case http.MethodPatch:
+		var req apiStudentUpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON.")
+			return
+		}
+		if req.Status != nil {
+			if normalized := watchdog.AdminUserStatusFromInput(*req.Status); normalized == "" {
+				writeJSONError(w, http.StatusBadRequest, "invalid_status", "status must be one of student, apprentice, pisciner, staff or extern.")
+				return
+			}
+		}
+		if _, ok, err := watchdog.AdminUserByLogin(login); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "user_load_failed", "Could not load admin user.")
+			return
+		} else if !ok {
+			writeJSONError(w, http.StatusNotFound, "user_not_found", "User not found.")
+			return
+		}
+
+		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.BlacklistReason == nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted or blacklist_reason.")
+			return
+		}
+
+		if _, err := watchdog.UpdateUserSettings(login, watchdog.UserSettingsPatch{
+			IsBlacklisted:    req.IsBlacklisted,
+			BlacklistReason:  req.BlacklistReason,
+			Status:           req.Status,
+			StatusOverridden: req.StatusOverridden,
+		}); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "settings_update_failed", "Could not update user settings.")
+			return
+		}
+
+		user, ok, err := watchdog.AdminUserByLogin(login)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "user_load_failed", "Could not load admin user.")
+			return
+		}
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "user_not_found", "User not found.")
+			return
+		}
+		writeJSON(w, http.StatusOK, mapAdminUser(user))
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func adminCalendarHandler(w http.ResponseWriter, r *http.Request) {
@@ -279,6 +380,31 @@ func adminCalendarHandler(w http.ResponseWriter, r *http.Request) {
 			Day:          day.DayKey,
 			StudentCount: day.StudentCount,
 			Live:         day.Live,
+		})
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+func adminReportsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	reports, err := watchdog.DailyReportSummaries()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "reports_load_failed", "Could not load daily reports.")
+		return
+	}
+
+	payload := make([]apiAdminReportSummary, 0, len(reports))
+	for _, report := range reports {
+		payload = append(payload, apiAdminReportSummary{
+			Day:          report.DayKey,
+			StudentCount: report.StudentCount,
+			PostedCount:  report.PostedCount,
+			FailedCount:  report.FailedCount,
+			Live:         report.Live,
 		})
 	}
 	writeJSON(w, http.StatusOK, payload)
@@ -405,30 +531,50 @@ func adminStudentHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "invalid_json", "Request body must be valid JSON.")
 			return
 		}
-		if _, ok, err := watchdog.CurrentUserByLogin(login); err != nil {
+		if _, ok, err := watchdog.AdminUserByLogin(login); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
 			return
 		} else if !ok {
-			writeJSONError(w, http.StatusNotFound, "student_not_found", "Student not found in watchdog state.")
+			writeJSONError(w, http.StatusNotFound, "student_not_found", "Student not found.")
 			return
 		}
 
-		switch {
-		case req.IsApprentice != nil:
-			watchdog.UpdateStudent(login, *req.IsApprentice)
-		case req.Refetch:
-			watchdog.RefetchStudent(login)
-		default:
-			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide is_apprentice or refetch=true.")
+		if req.Status != nil {
+			if normalized := watchdog.AdminUserStatusFromInput(*req.Status); normalized == "" {
+				writeJSONError(w, http.StatusBadRequest, "invalid_status", "status must be one of student, apprentice, pisciner, staff or extern.")
+				return
+			}
+		}
+		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.BlacklistReason == nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted or blacklist_reason.")
+			return
+		}
+		if _, err := watchdog.UpdateUserSettings(login, watchdog.UserSettingsPatch{
+			IsBlacklisted:    req.IsBlacklisted,
+			BlacklistReason:  req.BlacklistReason,
+			Status:           req.Status,
+			StatusOverridden: req.StatusOverridden,
+		}); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "settings_update_failed", "Could not update student settings.")
 			return
 		}
 
-		user, _, err := watchdog.CurrentUserByLogin(login)
+		user, ok, err := watchdog.CurrentUserByLogin(login)
+		if err == nil && ok {
+			writeJSON(w, http.StatusOK, mapUserWithLiveDuration(user))
+			return
+		}
+
+		summary, ok, err := watchdog.AdminUserByLogin(login)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
 			return
 		}
-		writeJSON(w, http.StatusOK, mapUserWithLiveDuration(user))
+		if !ok {
+			writeJSONError(w, http.StatusNotFound, "student_not_found", "Student not found.")
+			return
+		}
+		writeJSON(w, http.StatusOK, mapAdminUser(summary))
 	case http.MethodDelete:
 		user, ok, err := watchdog.CurrentUserByLogin(login)
 		if err != nil {
@@ -469,8 +615,8 @@ func studentMeHandler(w http.ResponseWriter, r *http.Request) {
 
 	targetLogin := authUser.FtLogin
 	if requestedLogin := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("login"))); requestedLogin != "" {
-		if !(authUser.IsStaff || authUser.FtIsStaff) {
-			writeJSONError(w, http.StatusForbidden, "forbidden_login_override", "Only staff can simulate another student.")
+		if !isUserAllowedLoginOverride(authUser) {
+			writeJSONError(w, http.StatusForbidden, "forbidden_login_override", "Only admins can simulate another student.")
 			return
 		}
 		targetLogin = requestedLogin
@@ -556,6 +702,18 @@ func mapUsers(users []watchdog.User) []apiUserState {
 	return out
 }
 
+func mapUsersWithAttendancePosts(users []watchdog.User, postsByLogin map[string][]watchdog.AttendancePostRecord) []apiUserState {
+	out := make([]apiUserState, 0, len(users))
+	for _, user := range users {
+		posts := postsByLogin[strings.ToLower(strings.TrimSpace(user.Login42))]
+		watchdog.PopulateUserPostResult(&user, posts)
+		item := mapUser(user)
+		item.AttendancePosts = mapAttendancePosts(posts)
+		out = append(out, *item)
+	}
+	return out
+}
+
 func mapUser(user watchdog.User) *apiUserState {
 	return mapUserWithDuration(user, user.Duration)
 }
@@ -573,19 +731,41 @@ func mapUserWithLiveDuration(user watchdog.User) *apiUserState {
 }
 
 func mapUserWithDuration(user watchdog.User, retainedDuration time.Duration) *apiUserState {
+	detectedStatus := user.Status42
+	if detectedStatus == "" {
+		detectedStatus = watchdog.AdminUserStatus(user.IsApprentice, user.Profile)
+	}
+	effectiveStatus := user.Status
+	if effectiveStatus == "" {
+		effectiveStatus = detectedStatus
+	}
 	return &apiUserState{
 		ControlAccessID:   user.ControlAccessID,
 		ControlAccessName: user.ControlAccessName,
 		Login42:           user.Login42,
 		ID42:              user.ID42,
 		IsApprentice:      user.IsApprentice,
+		Status:            effectiveStatus,
+		PostResult:        user.PostResult,
+		Status42:          detectedStatus,
+		StatusOverridden:  user.StatusOverridden,
+		IsBlacklisted:     user.IsBlacklisted,
+		BadgePostingOff:   user.BadgePostingOff,
+		BlacklistReason:   user.BlacklistReason,
 		Profile:           profileToString(user.Profile),
 		FirstAccess:       timePtr(user.FirstAccess),
 		LastAccess:        timePtr(user.LastAccess),
 		DurationSeconds:   int64(retainedDuration / time.Second),
 		DurationHuman:     retainedDuration.String(),
-		Status:            user.Status,
+		ErrorMessage:      errorMessageString(user.Error),
 	}
+}
+
+func errorMessageString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
 }
 
 func mapBadgeEvents(events []watchdog.BadgeEvent) []apiBadgeEvent {
@@ -664,11 +844,26 @@ func mapAdminUsers(users []watchdog.AdminUserSummary) []apiAdminUserListItem {
 }
 
 func mapAdminUser(user watchdog.AdminUserSummary) apiAdminUserListItem {
+	detectedStatus := user.Status42
+	if detectedStatus == "" {
+		detectedStatus = watchdog.AdminUserStatus(user.IsApprentice, user.Profile)
+	}
+	effectiveStatus := user.Status
+	if effectiveStatus == "" {
+		effectiveStatus = detectedStatus
+	}
 	return apiAdminUserListItem{
-		Login42:     user.Login42,
-		PhotoURL:    watchdog.CachedUserPhotoURLOrSchedule(user.Login42),
-		Status:      adminUserStatusLabel(user),
-		LastBadgeAt: timePtr(user.LastBadgeAt),
+		Login42:                     user.Login42,
+		PhotoURL:                    watchdog.CachedUserPhotoURLOrSchedule(user.Login42),
+		Status:                      effectiveStatus,
+		Status42:                    detectedStatus,
+		StatusOverridden:            user.StatusOverridden,
+		IsBlacklisted:               user.IsBlacklisted,
+		BadgePostingOff:             user.BadgePostingOff,
+		BlacklistReason:             user.BlacklistReason,
+		LastBadgeAt:                 timePtr(user.LastBadgeAt),
+		LastBadgeDayDurationSeconds: int64(user.DayDuration / time.Second),
+		LastBadgeDayDurationHuman:   user.DayDuration.String(),
 	}
 }
 
@@ -693,13 +888,10 @@ func mapAdminUserDetail(user watchdog.AdminUserSummary, days []watchdog.StudentA
 }
 
 func adminUserStatusLabel(user watchdog.AdminUserSummary) string {
-	if user.IsApprentice {
-		return "apprentice"
+	if user.Status != "" {
+		return user.Status
 	}
-	if user.Profile == watchdog.Pisciner {
-		return "pisciner"
-	}
-	return "student"
+	return watchdog.AdminUserStatus(user.IsApprentice, user.Profile)
 }
 
 func requestedDayKey(r *http.Request) (string, bool, error) {

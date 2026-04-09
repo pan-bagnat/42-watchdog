@@ -115,6 +115,11 @@ func requireAuth(next http.Handler, requireAdmin bool, allowTrustedLocal bool) h
 			writeJSONError(w, http.StatusForbidden, "blacklisted", "Your account is currently blacklisted.")
 			return
 		}
+		if !user.IsStaff && !user.FtIsStaff {
+			if err := watchdog.EnsureKnownUser(user.FtLogin, user.FtIsStaff); err != nil {
+				watchdog.Log("[AUTH] Failed to ensure watchdog user " + user.FtLogin + ": " + err.Error())
+			}
+		}
 
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authUserContextKey, user)))
 	})
@@ -391,9 +396,6 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 
 func isPanbagnatAdmin(user authUser) bool {
 	adminRolesOnce.Do(loadAdminRoles)
-	if len(adminRolesSet) == 0 {
-		return user.IsStaff || user.FtIsStaff
-	}
 	for _, role := range user.Roles {
 		if _, ok := adminRolesSet[normalizeRole(role.ID)]; ok {
 			return true
@@ -401,6 +403,16 @@ func isPanbagnatAdmin(user authUser) bool {
 		if _, ok := adminRolesSet[normalizeRole(role.Name)]; ok {
 			return true
 		}
+	}
+	return false
+}
+
+func isUserAllowedLoginOverride(user *authUser) bool {
+	if user == nil {
+		return false
+	}
+	if isPanbagnatAuthMode() {
+		return isPanbagnatAdmin(*user)
 	}
 	return user.IsStaff || user.FtIsStaff
 }

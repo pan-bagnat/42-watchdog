@@ -154,8 +154,8 @@ func loadStoredProfilePhoto(login string) (string, time.Time, bool, error) {
 	var photoURL string
 	var fetchedAtRaw sql.NullString
 	err := storageQueryRow(`
-		SELECT photo_url, fetched_at
-		FROM watchdog_profile_photos
+		SELECT photo_url, photo_fetched_at
+		FROM watchdog_users
 		WHERE login_42 = ?
 	`, login).Scan(&photoURL, &fetchedAtRaw)
 	if err != nil {
@@ -179,19 +179,21 @@ func saveStoredProfilePhoto(login, url string, fetchedAt time.Time) error {
 		return nil
 	}
 
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := storageExec(`
-		INSERT INTO watchdog_profile_photos (
-			login_42, photo_url, fetched_at, updated_at
-		) VALUES (?, ?, ?, ?)
+		INSERT INTO watchdog_users (
+			login_42, photo_url, photo_fetched_at, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(login_42) DO UPDATE SET
 			photo_url = excluded.photo_url,
-			fetched_at = excluded.fetched_at,
+			photo_fetched_at = excluded.photo_fetched_at,
 			updated_at = excluded.updated_at
 	`,
 		login,
 		url,
 		fetchedAt.UTC().Format(time.RFC3339Nano),
-		time.Now().UTC().Format(time.RFC3339Nano),
+		now,
+		now,
 	)
 	return err
 }
