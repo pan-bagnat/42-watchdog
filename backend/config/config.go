@@ -14,6 +14,7 @@ import (
 const AccessControl string = "access-control"
 const FTv2 string = "42-v2"
 const FTAttendance string = "42-attendance"
+const FTCFA string = "42-cfa"
 
 var ConfigData ConfigFile
 
@@ -56,6 +57,16 @@ type ConfigAttendance42 struct {
 	Password string `yaml:"password"`
 }
 
+type ConfigCFA42 struct {
+	TokenUrl string `yaml:"tokenUrl"`
+	Endpoint string `yaml:"endpoint"`
+	TestPath string `yaml:"testpath"`
+	Uid      string `yaml:"uid"`
+	Secret   string `yaml:"secret"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
 type ConfigMailer struct {
 	SmtpServer string   `yaml:"smtp_server"`
 	SmtpPort   int      `yaml:"smtp_port"`
@@ -77,6 +88,7 @@ type ConfigFile struct {
 	AccessControl ConfigAccessControl `yaml:"AccessControl"`
 	ApiV2         ConfigAPIV2         `yaml:"42apiV2"`
 	Attendance42  ConfigAttendance42  `yaml:"42Attendance"`
+	CFA42         ConfigCFA42         `yaml:"42CFA"`
 	Mailer        ConfigMailer        `yaml:"mailer"`
 	Storage       ConfigStorage       `yaml:"storage"`
 	Watchtime     ConfigWatchtime     `yaml:"watchtime"`
@@ -166,6 +178,14 @@ func applyEnvOverrides() error {
 	ConfigData.Attendance42.Secret = getEnv("FT_ATTENDANCE_SECRET", ConfigData.Attendance42.Secret)
 	ConfigData.Attendance42.Username = getEnv("FT_ATTENDANCE_USERNAME", ConfigData.Attendance42.Username)
 	ConfigData.Attendance42.Password = getEnv("FT_ATTENDANCE_PASSWORD", ConfigData.Attendance42.Password)
+
+	ConfigData.CFA42.TokenUrl = getEnv("FT_CFA_TOKEN_URL", ConfigData.CFA42.TokenUrl)
+	ConfigData.CFA42.Endpoint = getEnv("FT_CFA_ENDPOINT", ConfigData.CFA42.Endpoint)
+	ConfigData.CFA42.TestPath = getEnv("FT_CFA_TESTPATH", ConfigData.CFA42.TestPath)
+	ConfigData.CFA42.Uid = getEnv("FT_CFA_UID", ConfigData.CFA42.Uid)
+	ConfigData.CFA42.Secret = getEnv("FT_CFA_SECRET", ConfigData.CFA42.Secret)
+	ConfigData.CFA42.Username = getEnv("FT_CFA_USERNAME", ConfigData.CFA42.Username)
+	ConfigData.CFA42.Password = getEnv("FT_CFA_PASSWORD", ConfigData.CFA42.Password)
 
 	ConfigData.Mailer.SmtpServer = getEnv("MAILER_SMTP_SERVER", ConfigData.Mailer.SmtpServer)
 	ConfigData.Mailer.SmtpPort, err = getEnvInt("MAILER_SMTP_PORT", ConfigData.Mailer.SmtpPort)

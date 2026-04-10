@@ -30,9 +30,10 @@ type LocationSession struct {
 }
 
 type locationSessionsCacheEntry struct {
-	FetchedAt  time.Time
-	Sessions   []LocationSession
-	Refreshing bool
+	FetchedAt        time.Time
+	Sessions         []LocationSession
+	AttendanceBounds *AttendanceBounds
+	Refreshing       bool
 }
 
 var dailyLocationSessions = make(map[string]locationSessionsCacheEntry)
@@ -77,6 +78,16 @@ func locationSessionsBoundsForDay(dayKey string) (time.Time, time.Time) {
 	return dayStart, dayEnd
 }
 
+func locationSessionsBoundsForMonth(monthKey string) (time.Time, time.Time, error) {
+	loc := parisLocation()
+	start, err := time.ParseInLocation("2006-01", strings.TrimSpace(monthKey), loc)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	end := start.AddDate(0, 1, 0).Add(-time.Nanosecond)
+	return start, end, nil
+}
+
 func parseAPITimestamp(raw string) (time.Time, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -94,12 +105,24 @@ func fetchDailyLocationSessions(login string) ([]LocationSession, error) {
 	return fetchLocationSessionsForDay(login, todayDayKeyInParis())
 }
 
+func fetchDailySupplementalData(login, dayKey string) ([]LocationSession, *AttendanceBounds, error, error) {
+	badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+	if err != nil {
+		locationSessions, _, locationErr, _ := fetchSupplementalDayData(login, dayKey, true, false)
+		return locationSessions, nil, locationErr, err
+	}
+	return fetchSupplementalDayData(login, dayKey, true, len(badgeEvents) == 0)
+}
+
 func fetchLocationSessionsForDay(login string, dayKey string) ([]LocationSession, error) {
 	dayStart, dayEnd := locationSessionsBoundsForDay(dayKey)
+	return fetchLocationSessionsForRange(login, dayStart, dayEnd)
+}
 
+func fetchLocationSessionsForRange(login string, dayStart, dayEnd time.Time) ([]LocationSession, error) {
 	query := url.Values{}
 	query.Set("sort", "begin_at")
-	query.Set("page[size]", "100")
+	query.Set("page[size]", "1000")
 	query.Set("filter[campus_id]", strconv.Itoa(getCampusID()))
 	query.Set("range[begin_at]", dayStart.UTC().Format(time.RFC3339)+","+dayEnd.UTC().Format(time.RFC3339))
 
@@ -144,8 +167,9 @@ func fetchLocationSessionsForDay(login string, dayKey string) ([]LocationSession
 			ongoing = false
 		}
 
-		if dayKey != todayDayKeyInParis() && item.EndAt == nil {
-			endAt = dayEnd
+		sessionDayEnd := time.Date(beginAt.In(parisLocation()).Year(), beginAt.In(parisLocation()).Month(), beginAt.In(parisLocation()).Day(), 23, 59, 59, int(time.Second-time.Nanosecond), parisLocation())
+		if dayKeyInParis(beginAt) != todayDayKeyInParis() && item.EndAt == nil {
+			endAt = sessionDayEnd
 			ongoing = false
 		}
 
@@ -176,6 +200,28 @@ func fetchLocationSessionsForDay(login string, dayKey string) ([]LocationSession
 	return sessions, nil
 }
 
+func fetchLocationSessionsForMonth(login string, monthKey string) (map[string][]LocationSession, error) {
+	monthStart, monthEnd, err := locationSessionsBoundsForMonth(monthKey)
+	if err != nil {
+		return nil, err
+	}
+
+	sessions, err := fetchLocationSessionsForRange(login, monthStart, monthEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	grouped := make(map[string][]LocationSession)
+	for _, session := range sessions {
+		dayKey := dayKeyInParis(session.BeginAt)
+		if !strings.HasPrefix(dayKey, strings.TrimSpace(monthKey)+"-") {
+			continue
+		}
+		grouped[dayKey] = append(grouped[dayKey], session)
+	}
+	return grouped, nil
+}
+
 func SnapshotDailyLocationSessions(login string) []LocationSession {
 	login = strings.ToLower(strings.TrimSpace(login))
 	if login == "" {
@@ -197,7 +243,7 @@ func SnapshotDailyLocationSessions(login string) []LocationSession {
 	}
 	dailyLocationSessionsMutex.Unlock()
 
-	sessions, err := fetchDailyLocationSessions(login)
+	sessions, attendanceBounds, err, attendanceErr := fetchDailySupplementalData(login, todayDayKeyInParis())
 	if err != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch daily locations for %s: %v", login, err))
 		if len(staleSessions) > 0 {
@@ -205,20 +251,24 @@ func SnapshotDailyLocationSessions(login string) []LocationSession {
 		}
 		return nil
 	}
+	if attendanceErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch Chronos attendance fallback for %s: %v", login, attendanceErr))
+	}
 
 	dailyLocationSessionsMutex.Lock()
 	defer dailyLocationSessionsMutex.Unlock()
 
 	ensureDailyLocationSessionsLocked()
 	dailyLocationSessions[login] = locationSessionsCacheEntry{
-		FetchedAt: now,
-		Sessions:  cloneLocationSessions(sessions),
+		FetchedAt:        now,
+		Sessions:         cloneLocationSessions(sessions),
+		AttendanceBounds: cloneAttendanceBounds(attendanceBounds),
 	}
 	return cloneLocationSessions(sessions)
 }
 
 func refreshDailyLocationSessionsAsync(login, dayKey string) {
-	sessions, err := fetchLocationSessionsForDay(login, dayKey)
+	sessions, attendanceBounds, err, attendanceErr := fetchDailySupplementalData(login, dayKey)
 	now := time.Now()
 	shouldNotify := false
 
@@ -237,10 +287,15 @@ func refreshDailyLocationSessionsAsync(login, dayKey string) {
 		dailyLocationSessions[login] = entry
 		shouldNotify = true
 	} else {
+		if attendanceErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refresh Chronos attendance fallback for %s: %v", login, attendanceErr))
+			attendanceBounds = entry.AttendanceBounds
+		}
 		dailyLocationSessions[login] = locationSessionsCacheEntry{
-			FetchedAt:  now,
-			Sessions:   cloneLocationSessions(sessions),
-			Refreshing: false,
+			FetchedAt:        now,
+			Sessions:         cloneLocationSessions(sessions),
+			AttendanceBounds: cloneAttendanceBounds(attendanceBounds),
+			Refreshing:       false,
 		}
 		shouldNotify = true
 	}
@@ -285,6 +340,43 @@ func SnapshotDailyLocationSessionsOrSchedule(login string) ([]LocationSession, b
 
 	go refreshDailyLocationSessionsAsync(login, dayKey)
 	return staleSessions, true
+}
+
+func SnapshotDailyAttendanceBoundsOrSchedule(login string) (*AttendanceBounds, bool) {
+	login = strings.ToLower(strings.TrimSpace(login))
+	if login == "" {
+		return nil, false
+	}
+
+	now := time.Now()
+	dayKey := todayDayKeyInParis()
+
+	dailyLocationSessionsMutex.Lock()
+	ensureDailyLocationSessionsLocked()
+
+	entry, ok := dailyLocationSessions[login]
+	if ok && !entry.Refreshing && !entry.FetchedAt.IsZero() && now.Sub(entry.FetchedAt) < dailyLocationSessionsTTL {
+		bounds := cloneAttendanceBounds(entry.AttendanceBounds)
+		dailyLocationSessionsMutex.Unlock()
+		return bounds, false
+	}
+
+	staleBounds := cloneAttendanceBounds(entry.AttendanceBounds)
+	if ok && entry.Refreshing {
+		dailyLocationSessionsMutex.Unlock()
+		return staleBounds, true
+	}
+
+	dailyLocationSessions[login] = locationSessionsCacheEntry{
+		FetchedAt:        entry.FetchedAt,
+		Sessions:         cloneLocationSessions(entry.Sessions),
+		AttendanceBounds: staleBounds,
+		Refreshing:       true,
+	}
+	dailyLocationSessionsMutex.Unlock()
+
+	go refreshDailyLocationSessionsAsync(login, dayKey)
+	return staleBounds, true
 }
 
 func DeleteDailyLocationSessions(login string) {

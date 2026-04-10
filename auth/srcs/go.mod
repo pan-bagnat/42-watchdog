@@ -3,7 +3,7 @@ module backend
 go 1.25.5
 
 require (
-	github.com/TheKrainBow/go-api v1.0.6
+	github.com/TheKrainBow/go-api v1.0.7
 	github.com/go-chi/chi/v5 v5.2.4
 	github.com/go-chi/cors v1.2.2
 	github.com/google/go-cmp v0.7.0

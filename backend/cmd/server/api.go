@@ -90,14 +90,17 @@ type apiAdminStudentDaysResponse struct {
 }
 
 type apiAdminStudentDay struct {
-	Day             string     `json:"day"`
-	Live            bool       `json:"live"`
-	FirstAccess     *time.Time `json:"first_access,omitempty"`
-	LastAccess      *time.Time `json:"last_access,omitempty"`
-	DurationSeconds int64      `json:"duration_seconds"`
-	DurationHuman   string     `json:"duration_human"`
-	Status          string     `json:"status,omitempty"`
-	Loading         bool       `json:"loading,omitempty"`
+	Day                     string     `json:"day"`
+	Live                    bool       `json:"live"`
+	FirstAccess             *time.Time `json:"first_access,omitempty"`
+	LastAccess              *time.Time `json:"last_access,omitempty"`
+	DurationSeconds         int64      `json:"duration_seconds"`
+	DurationHuman           string     `json:"duration_human"`
+	Status                  string     `json:"status,omitempty"`
+	Loading                 bool       `json:"loading,omitempty"`
+	DayType                 string     `json:"day_type"`
+	DayTypeLabel            string     `json:"day_type_label"`
+	RequiredAttendanceHours *float64   `json:"required_attendance_hours"`
 }
 
 type apiAdminReportSummary struct {
@@ -193,14 +196,17 @@ func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 		for _, day := range days {
 			payload.Days = append(payload.Days, apiAdminStudentDay{
-				Day:             day.DayKey,
-				Live:            day.Live,
-				FirstAccess:     timePtr(day.FirstAccess),
-				LastAccess:      timePtr(day.LastAccess),
-				DurationSeconds: int64(day.Duration / time.Second),
-				DurationHuman:   day.Duration.String(),
-				Status:          day.Status,
-				Loading:         day.Loading,
+				Day:                     day.DayKey,
+				Live:                    day.Live,
+				FirstAccess:             timePtr(day.FirstAccess),
+				LastAccess:              timePtr(day.LastAccess),
+				DurationSeconds:         int64(day.Duration / time.Second),
+				DurationHuman:           day.Duration.String(),
+				Status:                  day.Status,
+				Loading:                 day.Loading,
+				DayType:                 day.DayType,
+				DayTypeLabel:            day.DayTypeLabel,
+				RequiredAttendanceHours: day.RequiredAttendanceHours,
 			})
 		}
 
@@ -450,14 +456,17 @@ func adminStudentDaysHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, day := range days {
 		payload.Days = append(payload.Days, apiAdminStudentDay{
-			Day:             day.DayKey,
-			Live:            day.Live,
-			FirstAccess:     timePtr(day.FirstAccess),
-			LastAccess:      timePtr(day.LastAccess),
-			DurationSeconds: int64(day.Duration / time.Second),
-			DurationHuman:   day.Duration.String(),
-			Status:          day.Status,
-			Loading:         day.Loading,
+			Day:                     day.DayKey,
+			Live:                    day.Live,
+			FirstAccess:             timePtr(day.FirstAccess),
+			LastAccess:              timePtr(day.LastAccess),
+			DurationSeconds:         int64(day.Duration / time.Second),
+			DurationHuman:           day.Duration.String(),
+			Status:                  day.Status,
+			Loading:                 day.Loading,
+			DayType:                 day.DayType,
+			DayTypeLabel:            day.DayTypeLabel,
+			RequiredAttendanceHours: day.RequiredAttendanceHours,
 		})
 	}
 	writeJSON(w, http.StatusOK, payload)
@@ -493,20 +502,33 @@ func adminStudentHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
 			return
 		}
-		badgeEvents := watchdog.SnapshotDailyBadgeEvents(login)
+		badgeEvents, badgeLoading := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(login)
 		locationSessions, locationsLoading := watchdog.SnapshotDailyLocationSessionsOrSchedule(login)
+		locationsLoading = locationsLoading || badgeLoading
 		if !ok {
+			fallbackUser, tracked, err := liveFallbackUserByLogin(login, badgeEvents, locationSessions)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
+				return
+			}
 			writeJSON(w, http.StatusOK, apiStudentMeResponse{
 				Day:              todayDayKey(),
 				Live:             true,
 				Login:            login,
-				Tracked:          false,
+				Tracked:          tracked,
 				LocationsLoading: locationsLoading,
+				User:             mapUserPtrWithDuration(fallbackUser, fallbackUser.Duration, tracked),
 				BadgeEvents:      mapBadgeEvents(badgeEvents),
 				LocationSessions: mapLocationSessions(locationSessions),
 				AttendancePosts:  []apiAttendancePost{},
 			})
 			return
+		}
+		if user.FirstAccess.IsZero() && len(badgeEvents) > 0 {
+			user.FirstAccess = badgeEvents[0].Timestamp
+		}
+		if user.LastAccess.IsZero() && len(badgeEvents) > 0 {
+			user.LastAccess = badgeEvents[len(badgeEvents)-1].Timestamp
 		}
 		retainedDuration := watchdog.CombinedRetainedDuration(
 			badgeEvents,
@@ -652,20 +674,33 @@ func studentMeHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
 		return
 	}
-	badgeEvents := watchdog.SnapshotDailyBadgeEvents(targetLogin)
+	badgeEvents, badgeLoading := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(targetLogin)
 	locationSessions, locationsLoading := watchdog.SnapshotDailyLocationSessionsOrSchedule(targetLogin)
+	locationsLoading = locationsLoading || badgeLoading
 	if !ok {
+		fallbackUser, tracked, err := liveFallbackUserByLogin(targetLogin, badgeEvents, locationSessions)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "student_load_failed", "Could not load watchdog state.")
+			return
+		}
 		writeJSON(w, http.StatusOK, apiStudentMeResponse{
 			Day:              todayDayKey(),
 			Live:             true,
 			Login:            targetLogin,
-			Tracked:          false,
+			Tracked:          tracked,
 			LocationsLoading: locationsLoading,
+			User:             mapUserPtrWithDuration(fallbackUser, fallbackUser.Duration, tracked),
 			BadgeEvents:      mapBadgeEvents(badgeEvents),
 			LocationSessions: mapLocationSessions(locationSessions),
 			AttendancePosts:  []apiAttendancePost{},
 		})
 		return
+	}
+	if user.FirstAccess.IsZero() && len(badgeEvents) > 0 {
+		user.FirstAccess = badgeEvents[0].Timestamp
+	}
+	if user.LastAccess.IsZero() && len(badgeEvents) > 0 {
+		user.LastAccess = badgeEvents[len(badgeEvents)-1].Timestamp
 	}
 
 	retainedDuration := watchdog.CombinedRetainedDuration(
@@ -719,8 +754,14 @@ func mapUser(user watchdog.User) *apiUserState {
 }
 
 func mapUserWithLiveDuration(user watchdog.User) *apiUserState {
-	badgeEvents := watchdog.SnapshotDailyBadgeEvents(user.Login42)
-	locationSessions := watchdog.SnapshotDailyLocationSessions(user.Login42)
+	badgeEvents, _ := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(user.Login42)
+	locationSessions, _ := watchdog.SnapshotDailyLocationSessionsOrSchedule(user.Login42)
+	if user.FirstAccess.IsZero() && len(badgeEvents) > 0 {
+		user.FirstAccess = badgeEvents[0].Timestamp
+	}
+	if user.LastAccess.IsZero() && len(badgeEvents) > 0 {
+		user.LastAccess = badgeEvents[len(badgeEvents)-1].Timestamp
+	}
 	retainedDuration := watchdog.CombinedRetainedDuration(
 		badgeEvents,
 		user.FirstAccess,
@@ -759,6 +800,57 @@ func mapUserWithDuration(user watchdog.User, retainedDuration time.Duration) *ap
 		DurationHuman:     retainedDuration.String(),
 		ErrorMessage:      errorMessageString(user.Error),
 	}
+}
+
+func mapUserPtrWithDuration(user watchdog.User, retainedDuration time.Duration, ok bool) *apiUserState {
+	if !ok {
+		return nil
+	}
+	return mapUserWithDuration(user, retainedDuration)
+}
+
+func liveFallbackUserByLogin(login string, badgeEvents []watchdog.BadgeEvent, locationSessions []watchdog.LocationSession) (watchdog.User, bool, error) {
+	if len(badgeEvents) == 0 && len(locationSessions) == 0 {
+		return watchdog.User{}, false, nil
+	}
+
+	user := watchdog.User{
+		Login42: login,
+		Profile: watchdog.Student,
+	}
+	if summary, ok, err := watchdog.AdminUserByLogin(login); err != nil {
+		return watchdog.User{}, false, err
+	} else if ok {
+		user.Login42 = summary.Login42
+		user.IsApprentice = summary.IsApprentice
+		user.Profile = summary.Profile
+		user.Status = summary.Status
+		user.Status42 = summary.Status42
+		user.StatusOverridden = summary.StatusOverridden
+		user.IsBlacklisted = summary.IsBlacklisted
+		user.BadgePostingOff = summary.BadgePostingOff
+		user.BlacklistReason = summary.BlacklistReason
+	}
+	if len(badgeEvents) > 0 {
+		user.FirstAccess = badgeEvents[0].Timestamp
+		user.LastAccess = badgeEvents[len(badgeEvents)-1].Timestamp
+	}
+	if len(locationSessions) > 0 {
+		if user.FirstAccess.IsZero() {
+			user.FirstAccess = locationSessions[0].BeginAt
+		}
+		if user.LastAccess.IsZero() {
+			user.LastAccess = locationSessions[len(locationSessions)-1].EndAt
+		}
+	}
+	if user.Status42 == "" {
+		user.Status42 = watchdog.AdminUserStatus(user.IsApprentice, user.Profile)
+	}
+	if user.Status == "" {
+		user.Status = user.Status42
+	}
+	user.Duration = watchdog.CombinedRetainedDuration(badgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
+	return user, true, nil
 }
 
 func errorMessageString(err error) string {
@@ -874,14 +966,17 @@ func mapAdminUserDetail(user watchdog.AdminUserSummary, days []watchdog.StudentA
 	}
 	for _, day := range days {
 		payload.Days = append(payload.Days, apiAdminStudentDay{
-			Day:             day.DayKey,
-			Live:            day.Live,
-			FirstAccess:     timePtr(day.FirstAccess),
-			LastAccess:      timePtr(day.LastAccess),
-			DurationSeconds: int64(day.Duration / time.Second),
-			DurationHuman:   day.Duration.String(),
-			Status:          day.Status,
-			Loading:         day.Loading,
+			Day:                     day.DayKey,
+			Live:                    day.Live,
+			FirstAccess:             timePtr(day.FirstAccess),
+			LastAccess:              timePtr(day.LastAccess),
+			DurationSeconds:         int64(day.Duration / time.Second),
+			DurationHuman:           day.Duration.String(),
+			Status:                  day.Status,
+			Loading:                 day.Loading,
+			DayType:                 day.DayType,
+			DayTypeLabel:            day.DayTypeLabel,
+			RequiredAttendanceHours: day.RequiredAttendanceHours,
 		})
 	}
 	return payload

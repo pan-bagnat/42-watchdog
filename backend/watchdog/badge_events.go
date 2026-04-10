@@ -56,6 +56,16 @@ func SnapshotDailyBadgeEvents(login string) []BadgeEvent {
 	return events
 }
 
+func SnapshotDailyEffectiveBadgeEventsOrSchedule(login string) ([]BadgeEvent, bool) {
+	events := SnapshotDailyBadgeEvents(login)
+	if len(events) > 0 {
+		return events, false
+	}
+
+	attendanceBounds, loading := SnapshotDailyAttendanceBoundsOrSchedule(login)
+	return applyAttendanceBoundsFallback(nil, attendanceBounds), loading
+}
+
 func DeleteDailyBadgeEvents(login string) {
 	ensureRuntimeDayState()
 	login = normalizeLogin(login)

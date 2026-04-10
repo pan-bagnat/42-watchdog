@@ -210,6 +210,7 @@ Moved to `backend/.env`:
 * Access-control endpoint and credentials
 * 42 API v2 endpoint, credentials, campus id, apprentice projects
 * 42 Chronos endpoint, credentials, and `autoPost`
+* 42 CFA endpoint and credentials
 * Mailer settings
 * `WATCHDOG_POSTGRES_URL` for Watchdog persistent storage
 * `WEBHOOK_SECRET`

@@ -115,9 +115,12 @@ func isProjectOngoing(login string, projectID string) (bool, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return false, fmt.Errorf("42 API returned status %d for project %s: %s", resp.StatusCode, projectID, strings.TrimSpace(string(body)))
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
 	}
 
 	respBytes, err := io.ReadAll(resp.Body)

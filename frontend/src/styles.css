@@ -578,6 +578,7 @@ button {
   flex-direction: column;
   gap: 0.1rem;
   padding: 0.7rem 0.85rem;
+  min-height: 4.35rem;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(16, 38, 31, 0.08);
@@ -1348,6 +1349,48 @@ button {
   gap: 0.55rem;
 }
 
+.calendar-day-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.9rem;
+}
+
+.calendar-day-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.72rem;
+  color: rgba(16, 38, 31, 0.72);
+}
+
+.calendar-day-legend-swatch {
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 0.35rem;
+  border: 1px solid rgba(16, 38, 31, 0.08);
+  flex: 0 0 auto;
+}
+
+.calendar-day-legend-swatch-company {
+  background: #f0b06a;
+}
+
+.calendar-day-legend-swatch-on_site_school {
+  background: #6c59e7;
+}
+
+.calendar-day-legend-swatch-off_site_school {
+  background: #75d7a1;
+}
+
+.calendar-day-legend-swatch-holiday {
+  background: #b46df1;
+}
+
+.calendar-day-legend-swatch-weekend {
+  background: #d1d5dc;
+}
+
 .presence-calendar-label {
   text-transform: capitalize;
   font-size: 0.92rem;
@@ -1408,6 +1451,36 @@ button {
     linear-gradient(180deg, rgba(36, 87, 232, 0.06), rgba(36, 87, 232, 0.01)),
     rgba(247, 250, 248, 0.98);
   color: #0f2b24;
+}
+
+.presence-day-cell.presence-day-type-company {
+  background:
+    linear-gradient(180deg, rgba(240, 176, 106, 0.24), rgba(240, 176, 106, 0.08)),
+    rgba(253, 249, 242, 0.98);
+}
+
+.presence-day-cell.presence-day-type-on_site_school {
+  background:
+    linear-gradient(180deg, rgba(108, 89, 231, 0.18), rgba(108, 89, 231, 0.05)),
+    rgba(247, 246, 255, 0.98);
+}
+
+.presence-day-cell.presence-day-type-off_site_school {
+  background:
+    linear-gradient(180deg, rgba(117, 215, 161, 0.2), rgba(117, 215, 161, 0.05)),
+    rgba(245, 252, 248, 0.98);
+}
+
+.presence-day-cell.presence-day-type-holiday {
+  background:
+    linear-gradient(180deg, rgba(180, 109, 241, 0.18), rgba(180, 109, 241, 0.05)),
+    rgba(251, 246, 255, 0.98);
+}
+
+.presence-day-cell.presence-day-type-weekend {
+  background:
+    linear-gradient(180deg, rgba(209, 213, 220, 0.26), rgba(209, 213, 220, 0.08)),
+    rgba(245, 246, 248, 0.98);
 }
 
 .presence-day-no-data {
@@ -1557,6 +1630,7 @@ button {
   flex-direction: column;
   gap: 0.18rem;
   padding: 0.95rem;
+  min-height: 4.6rem;
   border-radius: 18px;
   background: rgba(247, 250, 248, 0.92);
   border: 1px solid rgba(16, 38, 31, 0.06);
@@ -1609,6 +1683,7 @@ button {
 
 .admin-day-summary-slot .kv-row {
   padding: 0.75rem 0.85rem;
+  min-height: 4.2rem;
 }
 
 .admin-day-timeline-slot .student-day-timeline {
@@ -1939,6 +2014,200 @@ button {
   font-size: 0.9rem;
 }
 
+@keyframes skeleton-pulse {
+  0% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.55;
+  }
+}
+
+.skeleton-block {
+  display: block;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(154, 184, 171, 0.08), rgba(103, 141, 255, 0.22), rgba(154, 184, 171, 0.08));
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+.skeleton-line {
+  height: 0.82rem;
+}
+
+.skeleton-line-title {
+  width: min(18rem, 78%);
+  height: 1.45rem;
+}
+
+.skeleton-line-long {
+  width: 100%;
+}
+
+.skeleton-line-medium {
+  width: 68%;
+}
+
+.skeleton-line-short {
+  width: 42%;
+}
+
+.skeleton-line-tiny {
+  width: 22%;
+}
+
+.skeleton-circle {
+  border-radius: 999px;
+}
+
+.skeleton-avatar {
+  width: 3rem;
+  height: 3rem;
+}
+
+.skeleton-avatar-large {
+  width: 4.2rem;
+  height: 4.2rem;
+}
+
+.skeleton-button {
+  width: 8.8rem;
+  height: 2.8rem;
+}
+
+.skeleton-pill {
+  width: 8rem;
+  height: 2.4rem;
+}
+
+.skeleton-status-field {
+  width: 10rem;
+  height: 2.4rem;
+}
+
+.skeleton-action-button {
+  width: 9.4rem;
+  height: 2.5rem;
+}
+
+.skeleton-block-card {
+  min-height: 6rem;
+  border-radius: 18px;
+}
+
+.loading-panel-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.loading-panel-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+}
+
+.user-list-row-skeleton,
+.report-day-toggle-skeleton,
+.warning-callout-skeleton,
+.kv-row-skeleton,
+.presence-day-cell-skeleton {
+  pointer-events: none;
+}
+
+.warning-callout-skeleton {
+  border-color: rgba(154, 184, 171, 0.12);
+  background: rgba(14, 24, 35, 0.84);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.28);
+}
+
+.warning-callout-skeleton .skeleton-line + .skeleton-line {
+  margin-top: 0.15rem;
+}
+
+.user-detail-main-header-skeleton-actions {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 0.85rem;
+  padding-top: 0.35rem;
+}
+
+.badge-delay-chip-skeleton {
+  min-width: 10.25rem;
+}
+
+.badge-delay-chip-skeleton .skeleton-line-tiny {
+  width: 55%;
+}
+
+.badge-delay-chip-skeleton .skeleton-line-short {
+  width: 38%;
+}
+
+.user-detail-main .badge-delay-chip {
+  min-width: 10.25rem;
+}
+
+.presence-day-cell-skeleton {
+  justify-content: space-between;
+}
+
+.presence-day-cell-skeleton .skeleton-line-tiny {
+  width: 26%;
+}
+
+.presence-day-cell-skeleton .skeleton-line-short {
+  width: 58%;
+}
+
+.kv-row-skeleton strong,
+.kv-row-skeleton span {
+  display: block;
+}
+
+.timeline-frame-skeleton {
+  position: relative;
+  min-height: 17rem;
+  overflow: hidden;
+}
+
+.timeline-skeleton-bar {
+  position: absolute;
+  height: 0.85rem;
+  border-radius: 999px;
+}
+
+.timeline-skeleton-bar-1 {
+  top: 4.2rem;
+  left: 11%;
+  width: 28%;
+}
+
+.timeline-skeleton-bar-2 {
+  top: 7.3rem;
+  left: 24%;
+  width: 44%;
+}
+
+.timeline-skeleton-bar-3 {
+  top: 10.4rem;
+  left: 36%;
+  width: 22%;
+}
+
+.timeline-skeleton-bar-4 {
+  top: 13.5rem;
+  left: 57%;
+  width: 18%;
+}
+
 .loading-panel {
   max-width: 40rem;
   margin: 10vh auto 0;
@@ -2142,6 +2411,44 @@ button {
   color: #eef8f3;
 }
 
+.calendar-day-legend-item {
+  color: rgba(213, 230, 223, 0.76);
+}
+
+.calendar-day-legend-swatch {
+  border-color: rgba(154, 184, 171, 0.16);
+}
+
+.presence-day-cell.presence-day-type-company {
+  background:
+    linear-gradient(180deg, rgba(240, 176, 106, 0.26), rgba(240, 176, 106, 0.08)),
+    rgba(46, 35, 24, 0.96);
+}
+
+.presence-day-cell.presence-day-type-on_site_school {
+  background:
+    linear-gradient(180deg, rgba(108, 89, 231, 0.28), rgba(108, 89, 231, 0.08)),
+    rgba(28, 24, 49, 0.96);
+}
+
+.presence-day-cell.presence-day-type-off_site_school {
+  background:
+    linear-gradient(180deg, rgba(117, 215, 161, 0.26), rgba(117, 215, 161, 0.08)),
+    rgba(20, 41, 34, 0.96);
+}
+
+.presence-day-cell.presence-day-type-holiday {
+  background:
+    linear-gradient(180deg, rgba(180, 109, 241, 0.26), rgba(180, 109, 241, 0.08)),
+    rgba(39, 24, 49, 0.96);
+}
+
+.presence-day-cell.presence-day-type-weekend {
+  background:
+    linear-gradient(180deg, rgba(209, 213, 220, 0.2), rgba(209, 213, 220, 0.06)),
+    rgba(30, 38, 48, 0.96);
+}
+
 .presence-day-no-data {
   color: rgba(213, 230, 223, 0.54);
 }
@@ -2288,6 +2595,10 @@ button {
 
   .report-line {
     white-space: pre-wrap;
+  }
+
+  .loading-panel-skeleton-grid {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -53,13 +53,16 @@ type DailyReportSummary struct {
 }
 
 type StudentAttendanceDaySummary struct {
-	DayKey      string        `json:"day_key"`
-	FirstAccess time.Time     `json:"first_access"`
-	LastAccess  time.Time     `json:"last_access"`
-	Duration    time.Duration `json:"duration"`
-	Status      string        `json:"status"`
-	Live        bool          `json:"live"`
-	Loading     bool          `json:"loading"`
+	DayKey                  string        `json:"day_key"`
+	FirstAccess             time.Time     `json:"first_access"`
+	LastAccess              time.Time     `json:"last_access"`
+	Duration                time.Duration `json:"duration"`
+	Status                  string        `json:"status"`
+	Live                    bool          `json:"live"`
+	Loading                 bool          `json:"loading"`
+	DayType                 string        `json:"day_type"`
+	DayTypeLabel            string        `json:"day_type_label"`
+	RequiredAttendanceHours *float64      `json:"required_attendance_hours"`
 }
 
 type AdminUserSummary struct {
@@ -76,12 +79,20 @@ type AdminUserSummary struct {
 	DayDuration      time.Duration `json:"day_duration"`
 }
 
+type historicalMonthFetchTask struct {
+	Login    string
+	MonthKey string
+	DayKeys  []string
+}
+
 var (
-	storageDB                      *sql.DB
-	storageRuntimeDay              string
-	storageDayMutex                sync.Mutex
-	historicalMonthFetchesMu       sync.Mutex
-	historicalMonthFetchesInFlight = map[string]struct{}{}
+	storageDB                       *sql.DB
+	storageRuntimeDay               string
+	storageDayMutex                 sync.Mutex
+	historicalMonthFetchesMu        sync.Mutex
+	historicalMonthFetchesInFlight  = map[string]struct{}{}
+	historicalMonthFetchQueue       chan historicalMonthFetchTask
+	historicalMonthFetchWorkersOnce sync.Once
 )
 
 const storageSchema = `
@@ -187,6 +198,30 @@ CREATE TABLE IF NOT EXISTS watchdog_historical_location_fetches (
 	PRIMARY KEY (day_key, login_42)
 );
 
+CREATE TABLE IF NOT EXISTS watchdog_daily_attendance_bounds (
+	day_key TEXT NOT NULL,
+	login_42 TEXT NOT NULL,
+	begin_at TEXT NOT NULL,
+	end_at TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (day_key, login_42)
+);
+
+CREATE TABLE IF NOT EXISTS watchdog_historical_attendance_fetches (
+	day_key TEXT NOT NULL,
+	login_42 TEXT NOT NULL,
+	fetched_at TEXT NOT NULL,
+	PRIMARY KEY (day_key, login_42)
+);
+
+CREATE TABLE IF NOT EXISTS watchdog_cfa_training_ids (
+	login_42 TEXT PRIMARY KEY,
+	training_id INTEGER NOT NULL DEFAULT 0,
+	refreshed_month TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS watchdog_attendance_posts (
 	id BIGSERIAL PRIMARY KEY,
 	day_key TEXT NOT NULL,
@@ -211,6 +246,11 @@ CREATE TABLE IF NOT EXISTS watchdog_finalized_days (
 	finalized_at TEXT NOT NULL
 );
 `
+
+const (
+	historicalMonthFetchWorkerCount = 4
+	historicalMonthFetchQueueSize   = 32
+)
 
 func InitStorage() error {
 	databaseURL := strings.TrimSpace(config.ConfigData.Storage.DatabaseURL)
@@ -1815,17 +1855,18 @@ func buildDailyReportSummary(dayKey string, users []User) (DailyReportSummary, e
 	return report, nil
 }
 
-func loadHistoricalLocationDaySummaries(login string) (map[string]StudentAttendanceDaySummary, error) {
+func loadHistoricalLocationDaySummaries(login, monthKey string) (map[string]StudentAttendanceDaySummary, error) {
 	if storageDB == nil {
 		return nil, nil
 	}
 
 	login = normalizeLogin(login)
+	monthPattern := monthKeyLikePattern(monthKey)
 	fetchedRows, err := storageQuery(`
 		SELECT day_key
 		FROM watchdog_historical_location_fetches
-		WHERE login_42 = ?
-	`, login)
+		WHERE login_42 = ? AND day_key LIKE ?
+	`, login, monthPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1846,9 +1887,9 @@ func loadHistoricalLocationDaySummaries(login string) (map[string]StudentAttenda
 	sessionRows, err := storageQuery(`
 		SELECT day_key, begin_at, end_at, host, ongoing
 		FROM watchdog_daily_location_sessions
-		WHERE login_42 = ?
+		WHERE login_42 = ? AND day_key LIKE ?
 		ORDER BY day_key, begin_at
-	`, login)
+	`, login, monthPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1899,14 +1940,144 @@ func loadHistoricalLocationDaySummaries(login string) (map[string]StudentAttenda
 	return fetchedDays, nil
 }
 
-func enqueueHistoricalLocationFetch(login, dayKey string) {
+func loadHistoricalAttendanceBoundsByLogin(login, monthKey string) (map[string]*AttendanceBounds, error) {
+	if storageDB == nil {
+		return nil, nil
+	}
+
 	login = normalizeLogin(login)
-	dayKey = strings.TrimSpace(dayKey)
-	if storageDB == nil || login == "" || dayKey == "" || dayKey >= todayDayKeyInParis() {
+	monthPattern := monthKeyLikePattern(monthKey)
+	rows, err := storageQuery(`
+		SELECT day_key, begin_at, end_at, source
+		FROM watchdog_daily_attendance_bounds
+		WHERE login_42 = ? AND day_key LIKE ?
+	`, login, monthPattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	boundsByDay := make(map[string]*AttendanceBounds)
+	for rows.Next() {
+		var (
+			dayKey     string
+			beginAtRaw string
+			endAtRaw   string
+			source     string
+		)
+		if err := rows.Scan(&dayKey, &beginAtRaw, &endAtRaw, &source); err != nil {
+			return nil, err
+		}
+		beginAt, err := time.Parse(time.RFC3339Nano, beginAtRaw)
+		if err != nil {
+			return nil, err
+		}
+		endAt, err := time.Parse(time.RFC3339Nano, endAtRaw)
+		if err != nil {
+			return nil, err
+		}
+		boundsByDay[dayKey] = &AttendanceBounds{
+			BeginAt: beginAt,
+			EndAt:   endAt,
+			Source:  source,
+		}
+	}
+	return boundsByDay, rows.Err()
+}
+
+func loadHistoricalAttendanceFetchedDays(login, monthKey string) (map[string]struct{}, error) {
+	if storageDB == nil {
+		return nil, nil
+	}
+
+	login = normalizeLogin(login)
+	monthPattern := monthKeyLikePattern(monthKey)
+	rows, err := storageQuery(`
+		SELECT day_key
+		FROM watchdog_historical_attendance_fetches
+		WHERE login_42 = ? AND day_key LIKE ?
+	`, login, monthPattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fetchedDays := make(map[string]struct{})
+	for rows.Next() {
+		var dayKey string
+		if err := rows.Scan(&dayKey); err != nil {
+			return nil, err
+		}
+		fetchedDays[dayKey] = struct{}{}
+	}
+	return fetchedDays, rows.Err()
+}
+
+func ensureHistoricalMonthFetchWorkers() {
+	historicalMonthFetchWorkersOnce.Do(func() {
+		historicalMonthFetchQueue = make(chan historicalMonthFetchTask, historicalMonthFetchQueueSize)
+		for i := 0; i < historicalMonthFetchWorkerCount; i++ {
+			go func() {
+				for task := range historicalMonthFetchQueue {
+					processHistoricalMonthFetch(task.Login, task.MonthKey, task.DayKeys)
+				}
+			}()
+		}
+	})
+}
+
+func finishHistoricalMonthFetch(key string) {
+	historicalMonthFetchesMu.Lock()
+	delete(historicalMonthFetchesInFlight, key)
+	historicalMonthFetchesMu.Unlock()
+}
+
+func processHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
+	key := login + "|" + monthKey
+	defer finishHistoricalMonthFetch(key)
+
+	locationDays, locationErr := fetchLocationSessionsForMonth(login, monthKey)
+	if locationErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical monthly locations for %s on %s: %v", login, monthKey, locationErr))
 		return
 	}
 
-	key := login + "|" + dayKey
+	attendanceDays, attendanceErr := fetchAttendanceBoundsForMonth(login, monthKey)
+	if attendanceErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical monthly attendances for %s on %s: %v", login, monthKey, attendanceErr))
+	}
+
+	for _, dayKey := range dayKeys {
+		sessions := locationDays[dayKey]
+		if err := replaceHistoricalLocationSessions(dayKey, login, sessions); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist historical locations for %s on %s: %v", login, dayKey, err))
+			continue
+		}
+
+		badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+		if err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not inspect badge events for %s on %s: %v", login, dayKey, err))
+			continue
+		}
+		if len(badgeEvents) == 0 && attendanceErr == nil {
+			if err := replaceHistoricalAttendanceBounds(dayKey, login, attendanceDays[dayKey]); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist historical attendances for %s on %s: %v", login, dayKey, err))
+				continue
+			}
+		}
+		NotifyLocationSessionsUpdate(login, dayKey)
+	}
+}
+
+func enqueueHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
+	login = normalizeLogin(login)
+	monthKey = strings.TrimSpace(monthKey)
+	if storageDB == nil || login == "" || monthKey == "" || len(dayKeys) == 0 {
+		return
+	}
+	ensureHistoricalMonthFetchWorkers()
+
+	key := login + "|" + monthKey
 
 	historicalMonthFetchesMu.Lock()
 	if _, ok := historicalMonthFetchesInFlight[key]; ok {
@@ -1916,24 +2087,17 @@ func enqueueHistoricalLocationFetch(login, dayKey string) {
 	historicalMonthFetchesInFlight[key] = struct{}{}
 	historicalMonthFetchesMu.Unlock()
 
-	go func() {
-		defer func() {
-			historicalMonthFetchesMu.Lock()
-			delete(historicalMonthFetchesInFlight, key)
-			historicalMonthFetchesMu.Unlock()
-		}()
-
-		locationSessions, err := fetchLocationSessionsForDay(login, dayKey)
-		if err != nil {
-			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, err))
-			return
-		}
-		if err := replaceHistoricalLocationSessions(dayKey, login, locationSessions); err != nil {
-			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist historical locations for %s on %s: %v", login, dayKey, err))
-			return
-		}
-		NotifyLocationSessionsUpdate(login, dayKey)
-	}()
+	task := historicalMonthFetchTask{
+		Login:    login,
+		MonthKey: monthKey,
+		DayKeys:  append([]string(nil), dayKeys...),
+	}
+	select {
+	case historicalMonthFetchQueue <- task:
+	default:
+		finishHistoricalMonthFetch(key)
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: skipped historical monthly fetch for %s on %s because the queue is full", login, monthKey))
+	}
 }
 
 func monthDayKeys(monthKey string) ([]string, error) {
@@ -1950,18 +2114,31 @@ func monthDayKeys(monthKey string) ([]string, error) {
 	return days, nil
 }
 
+func monthKeyLikePattern(monthKey string) string {
+	trimmed := strings.TrimSpace(monthKey)
+	if trimmed == "" {
+		return "%"
+	}
+	return trimmed + "-%"
+}
+
 func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySummary, error) {
 	if storageDB == nil {
 		return nil, nil
 	}
 
 	login = normalizeLogin(login)
+	trimmedMonthKey := strings.TrimSpace(monthKey)
+	if trimmedMonthKey == "" {
+		trimmedMonthKey = todayDayKeyInParis()[:7]
+	}
+	monthPattern := monthKeyLikePattern(trimmedMonthKey)
 	rows, err := storageQuery(`
 		SELECT day_key, first_access, last_access, retained_duration_seconds, status
 		FROM watchdog_daily_student_summaries
-		WHERE login_42 = ?
+		WHERE login_42 = ? AND day_key LIKE ?
 		ORDER BY day_key DESC
-	`, login)
+	`, login, monthPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -1998,7 +2175,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 		return nil, err
 	}
 
-	historicalLocationDays, err := loadHistoricalLocationDaySummaries(login)
+	historicalLocationDays, err := loadHistoricalLocationDaySummaries(login, trimmedMonthKey)
 	if err != nil {
 		return nil, err
 	}
@@ -2019,67 +2196,167 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 		dayMap[dayKey] = summary
 	}
 
+	historicalAttendanceBoundsByDay, err := loadHistoricalAttendanceBoundsByLogin(login, trimmedMonthKey)
+	if err != nil {
+		return nil, err
+	}
+	for dayKey, bounds := range historicalAttendanceBoundsByDay {
+		existing := dayMap[dayKey]
+		if existing.DayKey == "" {
+			existing.DayKey = dayKey
+		}
+
+		badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+		if err != nil {
+			return nil, err
+		}
+		if len(badgeEvents) == 0 {
+			sessions, err := loadHistoricalLocationSessions(dayKey, login)
+			if err != nil {
+				return nil, err
+			}
+			record, err := syntheticHistoricalStudentDay(login, dayKey, sessions, bounds)
+			if err != nil {
+				return nil, err
+			}
+			if !record.User.FirstAccess.IsZero() {
+				existing.FirstAccess = record.User.FirstAccess
+			}
+			if !record.User.LastAccess.IsZero() {
+				existing.LastAccess = record.User.LastAccess
+			}
+			existing.Duration = record.RetainedDuration
+		} else {
+			if existing.FirstAccess.IsZero() && bounds != nil {
+				existing.FirstAccess = bounds.BeginAt
+			}
+			if existing.LastAccess.IsZero() && bounds != nil {
+				existing.LastAccess = bounds.EndAt
+			}
+			if existing.Duration <= 0 {
+				existing.Duration = attendanceBoundsDuration(bounds)
+			}
+		}
+		dayMap[dayKey] = existing
+	}
+
+	historicalAttendanceFetchedDays, err := loadHistoricalAttendanceFetchedDays(login, trimmedMonthKey)
+	if err != nil {
+		return nil, err
+	}
+
 	currentDayKey := currentRuntimeDayKey()
-	currentUser, ok, err := loadCurrentUserByLogin(currentDayKey, login)
-	if err != nil {
-		return nil, err
-	}
-	currentBadgeEvents, err := loadBadgeEventsForLogin(currentDayKey, login)
-	if err != nil {
-		return nil, err
-	}
-	currentLocationSessions, _ := SnapshotDailyLocationSessionsOrSchedule(login)
-
-	currentDaySummary := StudentAttendanceDaySummary{
-		DayKey:   currentDayKey,
-		Duration: CombinedRetainedDuration(currentBadgeEvents, time.Time{}, time.Time{}, currentLocationSessions),
-		Live:     true,
-	}
-	if ok {
-		currentDaySummary.FirstAccess = currentUser.FirstAccess
-		currentDaySummary.LastAccess = currentUser.LastAccess
-		currentDaySummary.Status = currentUser.Status
-		currentDaySummary.Duration = CombinedRetainedDuration(
-			currentBadgeEvents,
-			currentUser.FirstAccess,
-			currentUser.LastAccess,
-			currentLocationSessions,
-		)
-	}
-	if len(currentLocationSessions) > 0 {
-		if currentDaySummary.FirstAccess.IsZero() {
-			currentDaySummary.FirstAccess = currentLocationSessions[0].BeginAt
+	if strings.HasPrefix(currentDayKey, trimmedMonthKey+"-") {
+		currentUser, ok, err := loadCurrentUserByLogin(currentDayKey, login)
+		if err != nil {
+			return nil, err
 		}
-		if currentDaySummary.LastAccess.IsZero() {
-			currentDaySummary.LastAccess = currentLocationSessions[len(currentLocationSessions)-1].EndAt
+		currentBadgeEvents, err := loadBadgeEventsForLogin(currentDayKey, login)
+		if err != nil {
+			return nil, err
 		}
-	}
-	dayMap[currentDayKey] = currentDaySummary
+		currentLocationSessions, _ := SnapshotDailyLocationSessionsOrSchedule(login)
+		currentAttendanceBounds, _ := SnapshotDailyAttendanceBoundsOrSchedule(login)
+		effectiveCurrentBadgeEvents := applyAttendanceBoundsFallback(currentBadgeEvents, currentAttendanceBounds)
 
-	if trimmedMonthKey := strings.TrimSpace(monthKey); trimmedMonthKey != "" {
+		currentDaySummary := StudentAttendanceDaySummary{
+			DayKey:   currentDayKey,
+			Duration: CombinedRetainedDuration(effectiveCurrentBadgeEvents, time.Time{}, time.Time{}, currentLocationSessions),
+			Live:     true,
+		}
+		if ok {
+			currentDaySummary.FirstAccess = currentUser.FirstAccess
+			currentDaySummary.LastAccess = currentUser.LastAccess
+			currentDaySummary.Status = currentUser.Status
+			currentDaySummary.Duration = CombinedRetainedDuration(
+				effectiveCurrentBadgeEvents,
+				currentUser.FirstAccess,
+				currentUser.LastAccess,
+				currentLocationSessions,
+			)
+		}
+		if len(effectiveCurrentBadgeEvents) > 0 {
+			if currentDaySummary.FirstAccess.IsZero() {
+				currentDaySummary.FirstAccess = effectiveCurrentBadgeEvents[0].Timestamp
+			}
+			if currentDaySummary.LastAccess.IsZero() {
+				currentDaySummary.LastAccess = effectiveCurrentBadgeEvents[len(effectiveCurrentBadgeEvents)-1].Timestamp
+			}
+		}
+		if len(currentLocationSessions) > 0 {
+			if currentDaySummary.FirstAccess.IsZero() {
+				currentDaySummary.FirstAccess = currentLocationSessions[0].BeginAt
+			}
+			if currentDaySummary.LastAccess.IsZero() {
+				currentDaySummary.LastAccess = currentLocationSessions[len(currentLocationSessions)-1].EndAt
+			}
+		}
+		dayMap[currentDayKey] = currentDaySummary
+	}
+	if trimmedMonthKey != "" {
 		dayKeys, err := monthDayKeys(trimmedMonthKey)
 		if err != nil {
 			return nil, err
 		}
 		todayKey := todayDayKeyInParis()
+		missingHistoricalDayKeys := make([]string, 0, len(dayKeys))
 		for _, dayKey := range dayKeys {
-			if dayKey >= todayKey {
-				continue
+			summary, ok := dayMap[dayKey]
+			if !ok {
+				summary = StudentAttendanceDaySummary{
+					DayKey:   dayKey,
+					Duration: 0,
+				}
 			}
-			if _, ok := dayMap[dayKey]; ok {
-				continue
+			if dayKey < todayKey {
+				if _, fetched := historicalAttendanceFetchedDays[dayKey]; !fetched {
+					summary.Loading = true
+					missingHistoricalDayKeys = append(missingHistoricalDayKeys, dayKey)
+				}
 			}
-			dayMap[dayKey] = StudentAttendanceDaySummary{
-				DayKey:   dayKey,
-				Loading:  true,
-				Duration: 0,
+			dayMap[dayKey] = summary
+		}
+		enqueueHistoricalMonthFetch(login, trimmedMonthKey, missingHistoricalDayKeys)
+
+		calendarByDay, err := loadStudentCalendarMonth(login, trimmedMonthKey)
+		if err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load CFA calendar for %s on %s: %v", login, trimmedMonthKey, err))
+			calendarByDay, err = buildDefaultStudentCalendarMonth(trimmedMonthKey)
+			if err != nil {
+				return nil, err
 			}
-			enqueueHistoricalLocationFetch(login, dayKey)
+		}
+		for dayKey, calendarDay := range calendarByDay {
+			summary, ok := dayMap[dayKey]
+			if !ok {
+				summary = StudentAttendanceDaySummary{DayKey: dayKey}
+			}
+			summary.DayType = calendarDay.DayType
+			summary.DayTypeLabel = calendarDay.DayTypeLabel
+			summary.RequiredAttendanceHours = calendarDay.RequiredAttendanceHours
+			dayMap[dayKey] = summary
+		}
+	}
+
+	allowedDayKeys := map[string]struct{}{}
+	if trimmedMonthKey != "" {
+		dayKeys, err := monthDayKeys(trimmedMonthKey)
+		if err != nil {
+			return nil, err
+		}
+		allowedDayKeys = make(map[string]struct{}, len(dayKeys))
+		for _, dayKey := range dayKeys {
+			allowedDayKeys[dayKey] = struct{}{}
 		}
 	}
 
 	days := make([]StudentAttendanceDaySummary, 0, len(dayMap))
 	for _, day := range dayMap {
+		if len(allowedDayKeys) > 0 {
+			if _, ok := allowedDayKeys[day.DayKey]; !ok {
+				continue
+			}
+		}
 		days = append(days, day)
 	}
 	sort.Slice(days, func(i, j int) bool {
@@ -2223,9 +2500,14 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 			return nil, err
 		}
 		locationSessions, _ := SnapshotDailyLocationSessionsOrSchedule(user.Login42)
-		recalculatedDuration := CombinedRetainedDuration(badgeEvents, firstAccessTime, user.LastBadgeAt, locationSessions)
+		attendanceBounds, _ := SnapshotDailyAttendanceBoundsOrSchedule(user.Login42)
+		effectiveBadgeEvents := applyAttendanceBoundsFallback(badgeEvents, attendanceBounds)
+		recalculatedDuration := CombinedRetainedDuration(effectiveBadgeEvents, firstAccessTime, user.LastBadgeAt, locationSessions)
 		if recalculatedDuration > user.DayDuration {
 			user.DayDuration = recalculatedDuration
+		}
+		if user.LastBadgeAt.IsZero() && len(effectiveBadgeEvents) > 0 {
+			user.LastBadgeAt = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
 		}
 
 		users = append(users, user)
@@ -2297,10 +2579,14 @@ func loadActiveLoginsForDay(dayKey string) (map[string]struct{}, error) {
 		WHERE day_key = ?
 		UNION
 		SELECT DISTINCT login_42
+		FROM watchdog_daily_attendance_bounds
+		WHERE day_key = ?
+		UNION
+		SELECT DISTINCT login_42
 		FROM watchdog_badge_events
 		WHERE day_key = ?
 	`
-	args := []any{dayKey, dayKey, dayKey}
+	args := []any{dayKey, dayKey, dayKey, dayKey}
 
 	if dayKey == currentRuntimeDayKey() {
 		query = `
@@ -2460,6 +2746,44 @@ func loadHistoricalLocationSessions(dayKey, login string) ([]LocationSession, er
 	return sessions, rows.Err()
 }
 
+func loadHistoricalAttendanceBounds(dayKey, login string) (*AttendanceBounds, error) {
+	if storageDB == nil {
+		return nil, nil
+	}
+
+	login = strings.ToLower(strings.TrimSpace(login))
+	var (
+		beginAtRaw string
+		endAtRaw   string
+		source     string
+	)
+	err := storageQueryRow(`
+		SELECT begin_at, end_at, source
+		FROM watchdog_daily_attendance_bounds
+		WHERE day_key = ? AND login_42 = ?
+	`, dayKey, login).Scan(&beginAtRaw, &endAtRaw, &source)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	beginAt, err := time.Parse(time.RFC3339Nano, beginAtRaw)
+	if err != nil {
+		return nil, err
+	}
+	endAt, err := time.Parse(time.RFC3339Nano, endAtRaw)
+	if err != nil {
+		return nil, err
+	}
+	return &AttendanceBounds{
+		BeginAt: beginAt,
+		EndAt:   endAt,
+		Source:  source,
+	}, nil
+}
+
 func historicalLocationSessionsFetched(dayKey, login string) (bool, error) {
 	if storageDB == nil {
 		return false, nil
@@ -2470,6 +2794,27 @@ func historicalLocationSessionsFetched(dayKey, login string) (bool, error) {
 	err := storageQueryRow(`
 		SELECT fetched_at
 		FROM watchdog_historical_location_fetches
+		WHERE day_key = ? AND login_42 = ?
+	`, dayKey, login).Scan(&fetchedAt)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func historicalAttendanceBoundsFetched(dayKey, login string) (bool, error) {
+	if storageDB == nil {
+		return false, nil
+	}
+	login = strings.ToLower(strings.TrimSpace(login))
+
+	var fetchedAt string
+	err := storageQueryRow(`
+		SELECT fetched_at
+		FROM watchdog_historical_attendance_fetches
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(&fetchedAt)
 	if err == sql.ErrNoRows {
@@ -2530,16 +2875,69 @@ func replaceHistoricalLocationSessions(dayKey, login string, sessions []Location
 	return tx.Commit()
 }
 
-func syntheticHistoricalStudentDay(login, dayKey string, sessions []LocationSession) (HistoricalStudentDay, error) {
+func replaceHistoricalAttendanceBounds(dayKey, login string, bounds *AttendanceBounds) (err error) {
+	if storageDB == nil {
+		return nil
+	}
+	login = strings.ToLower(strings.TrimSpace(login))
+
+	tx, err := storageDB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(rebindPostgres(`DELETE FROM watchdog_daily_attendance_bounds WHERE day_key = ? AND login_42 = ?`), dayKey, login); err != nil {
+		return err
+	}
+
+	if bounds != nil {
+		if _, err = tx.Exec(rebindPostgres(`
+			INSERT INTO watchdog_daily_attendance_bounds (
+				day_key, login_42, begin_at, end_at, source, created_at
+			) VALUES (?, ?, ?, ?, ?, ?)
+		`),
+			dayKey,
+			login,
+			bounds.BeginAt.UTC().Format(time.RFC3339Nano),
+			bounds.EndAt.UTC().Format(time.RFC3339Nano),
+			bounds.Source,
+			time.Now().UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			return err
+		}
+	}
+
+	if _, err = tx.Exec(rebindPostgres(`
+		INSERT INTO watchdog_historical_attendance_fetches (day_key, login_42, fetched_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(day_key, login_42) DO UPDATE SET fetched_at = excluded.fetched_at
+	`), dayKey, login, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func syntheticHistoricalStudentDay(login, dayKey string, sessions []LocationSession, attendanceBounds *AttendanceBounds) (HistoricalStudentDay, error) {
 	login = normalizeLogin(login)
+	badgeEvents := attendanceBoundsAsBadgeEvents(attendanceBounds)
 	record := HistoricalStudentDay{
 		DayKey:           dayKey,
 		User:             User{Login42: login, Profile: Student},
-		BadgeEvents:      []BadgeEvent{},
+		BadgeEvents:      badgeEvents,
 		LocationSessions: sessions,
 		AttendancePosts:  []AttendancePostRecord{},
-		RetainedDuration: CombinedRetainedDuration(nil, time.Time{}, time.Time{}, sessions),
+		RetainedDuration: CombinedRetainedDuration(badgeEvents, time.Time{}, time.Time{}, sessions),
 		BadgeDuration:    0,
+	}
+	if attendanceBounds != nil {
+		record.User.FirstAccess = attendanceBounds.BeginAt
+		record.User.LastAccess = attendanceBounds.EndAt
 	}
 
 	if summary, ok, err := AdminUserByLogin(login); err != nil {
@@ -2687,11 +3085,27 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
 	}
-	record.BadgeEvents = badgeEventsByLogin[login]
+	realBadgeEvents := badgeEventsByLogin[login]
+	record.BadgeEvents = realBadgeEvents
+
+	attendanceBounds, err := loadHistoricalAttendanceBounds(dayKey, login)
+	if err != nil {
+		return HistoricalStudentDay{}, false, err
+	}
 
 	record.LocationSessions, err = loadHistoricalLocationSessions(dayKey, login)
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
+	}
+	if len(realBadgeEvents) == 0 {
+		record.BadgeEvents = applyAttendanceBoundsFallback(nil, attendanceBounds)
+		if record.User.FirstAccess.IsZero() && attendanceBounds != nil {
+			record.User.FirstAccess = attendanceBounds.BeginAt
+		}
+		if record.User.LastAccess.IsZero() && attendanceBounds != nil {
+			record.User.LastAccess = attendanceBounds.EndAt
+		}
+		record.RetainedDuration = CombinedRetainedDuration(record.BadgeEvents, record.User.FirstAccess, record.User.LastAccess, record.LocationSessions)
 	}
 	record.AttendancePosts, err = loadAttendancePosts(dayKey, login)
 	if err != nil {
@@ -2945,21 +3359,37 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 		}
 		PopulateUserPostResult(&user, attendancePosts)
 
-		locationSessions, err := fetchLocationSessionsForDay(login, dayKey)
-		if err != nil {
-			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, err))
+		realBadgeEvents := badgeEventsByLogin[login]
+		locationSessions, attendanceBounds, locationErr, attendanceErr := fetchSupplementalDayData(login, dayKey, true, len(realBadgeEvents) == 0)
+		if locationErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, locationErr))
 			locationSessions = nil
 		}
 		if err := replaceHistoricalLocationSessions(dayKey, login, locationSessions); err != nil {
 			return err
 		}
+		if len(realBadgeEvents) == 0 {
+			if attendanceErr != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch Chronos attendance fallback for %s on %s: %v", login, dayKey, attendanceErr))
+			} else if err := replaceHistoricalAttendanceBounds(dayKey, login, attendanceBounds); err != nil {
+				return err
+			}
+			if user.FirstAccess.IsZero() && attendanceBounds != nil {
+				user.FirstAccess = attendanceBounds.BeginAt
+			}
+			if user.LastAccess.IsZero() && attendanceBounds != nil {
+				user.LastAccess = attendanceBounds.EndAt
+			}
+		}
+
+		effectiveBadgeEvents := applyAttendanceBoundsFallback(realBadgeEvents, attendanceBounds)
 
 		record := HistoricalStudentDay{
 			DayKey:           dayKey,
 			User:             user,
-			BadgeEvents:      badgeEventsByLogin[login],
+			BadgeEvents:      effectiveBadgeEvents,
 			LocationSessions: locationSessions,
-			RetainedDuration: CombinedRetainedDuration(badgeEventsByLogin[login], user.FirstAccess, user.LastAccess, locationSessions),
+			RetainedDuration: CombinedRetainedDuration(effectiveBadgeEvents, user.FirstAccess, user.LastAccess, locationSessions),
 			BadgeDuration:    user.Duration,
 		}
 		if err := saveHistoricalSummary(record); err != nil {
@@ -2977,35 +3407,66 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 		return record, ok, err
 	}
 
+	badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+	if err != nil {
+		return HistoricalStudentDay{}, false, err
+	}
+
 	cachedSessions, err := loadHistoricalLocationSessions(dayKey, login)
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
 	}
-	if fetched, err := historicalLocationSessionsFetched(dayKey, login); err != nil {
+	cachedAttendanceBounds, err := loadHistoricalAttendanceBounds(dayKey, login)
+	if err != nil {
 		return HistoricalStudentDay{}, false, err
-	} else if fetched {
-		record, err := syntheticHistoricalStudentDay(login, dayKey, cachedSessions)
+	}
+
+	locationFetched, err := historicalLocationSessionsFetched(dayKey, login)
+	if err != nil {
+		return HistoricalStudentDay{}, false, err
+	}
+	attendanceFetched, err := historicalAttendanceBoundsFetched(dayKey, login)
+	if err != nil {
+		return HistoricalStudentDay{}, false, err
+	}
+
+	if locationFetched && (attendanceFetched || len(badgeEvents) > 0) {
+		record, err := syntheticHistoricalStudentDay(login, dayKey, cachedSessions, cachedAttendanceBounds)
 		if err != nil {
 			return HistoricalStudentDay{}, false, err
 		}
 		return record, true, nil
 	}
 
-	locationSessions, err := fetchLocationSessionsForDay(login, dayKey)
-	if err != nil {
-		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, err))
-		record, synthErr := syntheticHistoricalStudentDay(login, dayKey, nil)
+	needLocations := !locationFetched
+	needAttendance := !attendanceFetched && len(badgeEvents) == 0
+	locationSessions, attendanceBounds, locationErr, attendanceErr := fetchSupplementalDayData(login, dayKey, needLocations, needAttendance)
+	if locationErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, locationErr))
+		record, synthErr := syntheticHistoricalStudentDay(login, dayKey, cachedSessions, cachedAttendanceBounds)
 		if synthErr != nil {
 			return HistoricalStudentDay{}, false, synthErr
 		}
 		return record, true, nil
 	}
-	if err := replaceHistoricalLocationSessions(dayKey, login, locationSessions); err != nil {
-		return HistoricalStudentDay{}, false, err
+	if needLocations {
+		if err := replaceHistoricalLocationSessions(dayKey, login, locationSessions); err != nil {
+			return HistoricalStudentDay{}, false, err
+		}
+		cachedSessions = locationSessions
+	}
+	if needAttendance {
+		if attendanceErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch Chronos attendance fallback for %s on %s: %v", login, dayKey, attendanceErr))
+		} else if err := replaceHistoricalAttendanceBounds(dayKey, login, attendanceBounds); err != nil {
+			return HistoricalStudentDay{}, false, err
+		} else {
+			cachedAttendanceBounds = attendanceBounds
+		}
 	}
 	NotifyLocationSessionsUpdate(login, dayKey)
 
-	record, err = syntheticHistoricalStudentDay(login, dayKey, locationSessions)
+	record, err = syntheticHistoricalStudentDay(login, dayKey, cachedSessions, cachedAttendanceBounds)
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
 	}

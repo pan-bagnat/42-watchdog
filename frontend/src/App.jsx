@@ -23,6 +23,13 @@ const MANAGED_STATUS_OPTIONS = [
   { value: "staff", label: "Staff", emoji: "🛠️" },
   { value: "extern", label: "Externe", emoji: "🌍" }
 ];
+const CALENDAR_DAY_TYPES = [
+  { value: "company", label: "Jour entreprise" },
+  { value: "on_site_school", label: "Jour école sur site" },
+  { value: "off_site_school", label: "Jour école à distance" },
+  { value: "holiday", label: "Jour férié" },
+  { value: "weekend", label: "Week-end" }
+];
 
 function formatDuration(seconds, fallback) {
   if (typeof seconds !== "number" || Number.isNaN(seconds)) {
@@ -150,6 +157,28 @@ function formatStatusLabel(status) {
     default:
       return "Étudiant";
   }
+}
+
+function getCalendarDayMeta(dayType, fallbackLabel = "") {
+  const normalized = String(dayType || "").trim().toLowerCase();
+  const match = CALENDAR_DAY_TYPES.find((item) => item.value === normalized);
+  if (match) {
+    return match;
+  }
+  return {
+    value: normalized || "on_site_school",
+    label: fallbackLabel || "Jour école sur site"
+  };
+}
+
+function formatRequiredAttendanceHours(hours) {
+  if (typeof hours !== "number" || Number.isNaN(hours)) {
+    return "Non défini";
+  }
+  return `${new Intl.NumberFormat("fr-FR", {
+    minimumFractionDigits: Number.isInteger(hours) ? 0 : 1,
+    maximumFractionDigits: 2
+  }).format(hours)}h`;
 }
 
 function getDetectedStatus(user) {
@@ -389,48 +418,131 @@ async function requestJSON(url, options = {}) {
   return { response, text, json };
 }
 
-function subscribeToLiveUpdates(onEvent) {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}/api/live`;
-  let socket = null;
-  let reconnectTimer = 0;
-  let closed = false;
+const liveUpdateListeners = new Set();
+let liveUpdateSocket = null;
+let liveUpdateReconnectTimer = 0;
 
-  function connect() {
-    socket = new WebSocket(url);
-
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        onEvent(payload);
-      } catch {
-        // Ignore malformed live events.
-      }
-    };
-
-    socket.onerror = () => {
-      socket?.close();
-    };
-
-    socket.onclose = () => {
-      if (closed) {
-        return;
-      }
-      reconnectTimer = window.setTimeout(connect, 2000);
-    };
+function ensureLiveUpdatesSocket() {
+  if (liveUpdateSocket && (liveUpdateSocket.readyState === WebSocket.OPEN || liveUpdateSocket.readyState === WebSocket.CONNECTING)) {
+    return;
   }
 
-  connect();
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${protocol}//${window.location.host}/api/live`;
+  liveUpdateSocket = new WebSocket(url);
 
-  return () => {
-    closed = true;
-    if (reconnectTimer) {
-      window.clearTimeout(reconnectTimer);
-    }
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-      socket.close();
+  liveUpdateSocket.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(event.data);
+      for (const listener of liveUpdateListeners) {
+        listener(payload);
+      }
+    } catch {
+      // Ignore malformed live events.
     }
   };
+
+  liveUpdateSocket.onerror = () => {
+    liveUpdateSocket?.close();
+  };
+
+  liveUpdateSocket.onclose = () => {
+    liveUpdateSocket = null;
+    if (liveUpdateReconnectTimer) {
+      window.clearTimeout(liveUpdateReconnectTimer);
+      liveUpdateReconnectTimer = 0;
+    }
+    if (liveUpdateListeners.size === 0) {
+      return;
+    }
+    liveUpdateReconnectTimer = window.setTimeout(() => {
+      ensureLiveUpdatesSocket();
+    }, 2000);
+  };
+}
+
+function subscribeToLiveUpdates(onEvent) {
+  if (typeof onEvent !== "function") {
+    return () => {};
+  }
+  liveUpdateListeners.add(onEvent);
+  ensureLiveUpdatesSocket();
+
+  return () => {
+    liveUpdateListeners.delete(onEvent);
+    if (liveUpdateListeners.size > 0) {
+      return;
+    }
+    if (liveUpdateReconnectTimer) {
+      window.clearTimeout(liveUpdateReconnectTimer);
+      liveUpdateReconnectTimer = 0;
+    }
+    if (liveUpdateSocket && (liveUpdateSocket.readyState === WebSocket.OPEN || liveUpdateSocket.readyState === WebSocket.CONNECTING)) {
+      liveUpdateSocket.close();
+    }
+  };
+}
+
+function mergeDaySummary(days, nextSummary) {
+  const currentDays = Array.isArray(days) ? days : [];
+  if (!nextSummary || !nextSummary.day) {
+    return currentDays;
+  }
+
+  let found = false;
+  const merged = currentDays.map((day) => {
+    if (day?.day !== nextSummary.day) {
+      return day;
+    }
+    found = true;
+    return {
+      ...day,
+      ...nextSummary,
+      loading: false,
+      day_type: nextSummary.day_type ?? day.day_type,
+      day_type_label: nextSummary.day_type_label ?? day.day_type_label,
+      required_attendance_hours:
+        nextSummary.required_attendance_hours ?? day.required_attendance_hours
+    };
+  });
+
+  if (!found) {
+    merged.push(nextSummary);
+  }
+
+  merged.sort((left, right) => String(right?.day || "").localeCompare(String(left?.day || "")));
+  return merged;
+}
+
+function mergeLiveDetailPayload(payload, event) {
+  if (!payload || !event?.day_summary) {
+    return payload;
+  }
+
+  const nextPayload = {
+    ...payload,
+    days: mergeDaySummary(payload.days, event.day_summary)
+  };
+
+  if (event.last_badge_at) {
+    nextPayload.last_badge_at = event.last_badge_at;
+  }
+  if (typeof event.last_badge_day_duration_seconds === "number") {
+    nextPayload.last_badge_day_duration_seconds = event.last_badge_day_duration_seconds;
+  }
+  if (typeof event.last_badge_day_duration_human === "string" && event.last_badge_day_duration_human !== "") {
+    nextPayload.last_badge_day_duration_human = event.last_badge_day_duration_human;
+  }
+
+  return nextPayload;
+}
+
+function shouldApplyLiveEvent(event, login, monthKey) {
+  const eventLogin = String(event?.login || "").trim().toLowerCase();
+  const targetLogin = String(login || "").trim().toLowerCase();
+  const eventDay = String(event?.day || "").trim();
+  const targetMonth = String(monthKey || "").trim();
+  return eventLogin !== "" && eventLogin === targetLogin && eventDay.startsWith(`${targetMonth}-`);
 }
 
 function BadgeDelayChip({ seconds }) {
@@ -666,6 +778,210 @@ function KeyValue({ label, value }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function SkeletonBlock({ className = "" }) {
+  return <span className={`skeleton-block${className ? ` ${className}` : ""}`} aria-hidden />;
+}
+
+function CalendarDayLegend() {
+  return (
+    <div className="calendar-day-legend" aria-label="Légende du calendrier">
+      {CALENDAR_DAY_TYPES.map((item) => (
+        <div key={item.value} className="calendar-day-legend-item">
+          <span className={`calendar-day-legend-swatch calendar-day-legend-swatch-${item.value}`} aria-hidden />
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SessionLoadingSkeleton() {
+  return (
+    <main className="app-shell">
+      <section className="panel loading-panel loading-panel-skeleton">
+        <SkeletonBlock className="skeleton-line skeleton-line-title" />
+        <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+        <div className="loading-panel-skeleton-grid">
+          <SkeletonBlock className="skeleton-block-card" />
+          <SkeletonBlock className="skeleton-block-card" />
+          <SkeletonBlock className="skeleton-block-card" />
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function UserListSkeleton({ count = 7 }) {
+  return (
+    <div className="user-list" aria-hidden>
+      {Array.from({ length: count }, (_, index) => (
+        <div key={`user-skeleton-${index}`} className="user-list-row user-list-row-skeleton">
+          <SkeletonBlock className="skeleton-circle skeleton-avatar" />
+          <div className="user-list-main">
+            <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+            <SkeletonBlock className="skeleton-line skeleton-line-short" />
+          </div>
+          <div className="user-list-side">
+            <SkeletonBlock className="skeleton-line skeleton-line-short" />
+            <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReportDetailSkeleton({ lines = 5 }) {
+  return (
+    <div className="report-mail" aria-hidden>
+      {Array.from({ length: lines }, (_, index) => (
+        <SkeletonBlock
+          key={`report-detail-skeleton-${index}`}
+          className={`skeleton-line ${index % 3 === 0 ? "skeleton-line-long" : index % 3 === 1 ? "skeleton-line-medium" : "skeleton-line-short"}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ReportsListSkeleton({ count = 4 }) {
+  return (
+    <div className="report-day-list" aria-hidden>
+      {Array.from({ length: count }, (_, index) => (
+        <section key={`report-skeleton-${index}`} className="report-day-card">
+          <div className="report-day-toggle report-day-toggle-skeleton">
+            <div className="report-day-main">
+              <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+              <SkeletonBlock className="skeleton-line skeleton-line-short" />
+            </div>
+            <div className="report-day-stats">
+              <SkeletonBlock className="skeleton-line skeleton-line-short" />
+              <SkeletonBlock className="skeleton-line skeleton-line-short" />
+            </div>
+            <SkeletonBlock className="skeleton-line skeleton-line-tiny" />
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function PresenceCalendarSkeleton({ monthKey }) {
+  const weekdayLabels = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
+  const activeMonthKey = monthKey || formatMonthKey(new Date());
+  const activeMonthDate = parseMonthKey(activeMonthKey);
+  const monthStart = activeMonthDate instanceof Date ? new Date(activeMonthDate.getFullYear(), activeMonthDate.getMonth(), 1) : null;
+  const daysInMonth = monthStart ? new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate() : 35;
+  const firstWeekday = monthStart ? (monthStart.getDay() + 6) % 7 : 0;
+  const cells = [];
+
+  for (let index = 0; index < firstWeekday; index += 1) {
+    cells.push(null);
+  }
+  for (let index = 1; index <= daysInMonth; index += 1) {
+    cells.push(index);
+  }
+
+  return (
+    <section className="presence-calendar-shell" aria-hidden>
+      <div className="presence-calendar-toolbar">
+        <button className="secondary-button" type="button" disabled>
+          Mois précédent
+        </button>
+        <strong className="presence-calendar-label">{formatMonthLabel(activeMonthDate)}</strong>
+        <button className="secondary-button" type="button" disabled>
+          Mois suivant
+        </button>
+      </div>
+      <CalendarDayLegend />
+      <section className="presence-month-card presence-month-card-compact">
+        <div className="presence-weekdays">
+          {weekdayLabels.map((label) => (
+            <span key={`${activeMonthKey}-weekday-skeleton-${label}`}>{label}</span>
+          ))}
+        </div>
+        <div className="presence-day-grid presence-day-grid-compact">
+          {cells.map((cell, index) =>
+            cell ? (
+              <div key={`${activeMonthKey}-day-skeleton-${index}`} className="presence-day-cell presence-day-cell-skeleton">
+                <SkeletonBlock className="skeleton-line skeleton-line-tiny" />
+                <SkeletonBlock className="skeleton-line skeleton-line-short" />
+              </div>
+            ) : (
+              <div key={`${activeMonthKey}-day-empty-${index}`} className="presence-day-cell presence-day-empty" aria-hidden />
+            )
+          )}
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function AdminUserDayDetailSkeleton({ dayKey }) {
+  return (
+    <>
+      <section className="admin-day-summary-slot" aria-hidden>
+        <div className="admin-day-heading">
+          <h2>{formatLongDayLabel(dayKey)}</h2>
+        </div>
+        <div className="student-day-summary admin-day-summary-grid">
+          {Array.from({ length: 6 }, (_, index) => (
+            <div key={`day-summary-skeleton-${index}`} className="kv-row kv-row-skeleton">
+              <SkeletonBlock className="skeleton-line skeleton-line-short" />
+              <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="admin-day-timeline-slot" aria-hidden>
+        <div className="timeline-frame timeline-frame-skeleton">
+          {Array.from({ length: 4 }, (_, index) => (
+            <SkeletonBlock key={`timeline-skeleton-${index}`} className={`timeline-skeleton-bar timeline-skeleton-bar-${index + 1}`} />
+          ))}
+        </div>
+      </section>
+    </>
+  );
+}
+
+function UserPresencePanelSkeleton({ selectedDayKey, selectedMonthKey, showAdminActions = false }) {
+  const dayKey = selectedDayKey || formatDayKey(new Date());
+  return (
+    <section className="panel" aria-hidden>
+      <section className="user-detail-dashboard">
+        <div className="user-detail-main">
+          <div className="user-detail-main-header">
+            <div className="user-detail-hero">
+              <SkeletonBlock className="skeleton-circle skeleton-avatar-large" />
+              <div className="user-detail-meta">
+                <SkeletonBlock className="skeleton-line skeleton-line-title" />
+                <SkeletonBlock className="skeleton-status-field" />
+                <SkeletonBlock className="skeleton-line skeleton-line-short" />
+              </div>
+            </div>
+            <div className="user-detail-main-header-skeleton-actions">
+              {showAdminActions ? <SkeletonBlock className="skeleton-action-button" /> : null}
+              <div className="badge-delay-chip badge-delay-chip-skeleton">
+                <SkeletonBlock className="skeleton-line skeleton-line-tiny" />
+                <SkeletonBlock className="skeleton-line skeleton-line-short" />
+              </div>
+            </div>
+          </div>
+          <div className="warning-callout warning-callout-skeleton">
+            <SkeletonBlock className="skeleton-line skeleton-line-short" />
+            <SkeletonBlock className="skeleton-line skeleton-line-long" />
+            <SkeletonBlock className="skeleton-line skeleton-line-medium" />
+          </div>
+        </div>
+        <AdminUserDayDetailSkeleton dayKey={dayKey} />
+        <div className="user-detail-calendar-column">
+          <PresenceCalendarSkeleton monthKey={selectedMonthKey} />
+        </div>
+      </section>
+    </section>
   );
 }
 
@@ -992,15 +1308,17 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
 
   useEffect(() => {
     return subscribeToLiveUpdates((event) => {
-      const eventLogin = (event?.login || "").trim().toLowerCase();
-      if (eventLogin !== user.ft_login.trim().toLowerCase()) {
+      if (!shouldApplyLiveEvent(event, user.ft_login, selectedMonthKey)) {
         return;
       }
-      if (event?.type === "badge_received") {
-        void loadSelfDetail({ monthKey: selectedMonthKey, background: true });
+      if (event?.day_summary) {
+        setState((current) => ({
+          ...current,
+          payload: mergeLiveDetailPayload(current.payload, event)
+        }));
         return;
       }
-      if (event?.type === "location_sessions_updated" && String(event?.day || "").startsWith(selectedMonthKey)) {
+      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
         void loadSelfDetail({ monthKey: selectedMonthKey, background: true });
       }
     });
@@ -1105,10 +1423,47 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
 
   useEffect(() => {
     return subscribeToLiveUpdates((event) => {
-      if (event?.type !== "badge_received") {
+      const eventLogin = String(event?.login || "").trim().toLowerCase();
+      const todayKey = formatDayKey(new Date());
+      if (!eventLogin) {
         return;
       }
-      void loadUsers(searchInput, activeStatuses, dateInput);
+      if (event?.type === "badge_received") {
+        setUsers((current) =>
+          current.map((item) =>
+            String(item?.login_42 || "").trim().toLowerCase() !== eventLogin
+              ? item
+              : {
+                  ...item,
+                  ...(event.last_badge_at ? { last_badge_at: event.last_badge_at } : {}),
+                  ...(typeof event.last_badge_day_duration_seconds === "number"
+                    ? { last_badge_day_duration_seconds: event.last_badge_day_duration_seconds }
+                    : {}),
+                  ...(typeof event.last_badge_day_duration_human === "string" && event.last_badge_day_duration_human !== ""
+                    ? { last_badge_day_duration_human: event.last_badge_day_duration_human }
+                    : {})
+                }
+          )
+        );
+        return;
+      }
+      if (event?.type === "location_sessions_updated" && event?.day === todayKey) {
+        setUsers((current) =>
+          current.map((item) =>
+            String(item?.login_42 || "").trim().toLowerCase() !== eventLogin
+              ? item
+              : {
+                  ...item,
+                  ...(typeof event.last_badge_day_duration_seconds === "number"
+                    ? { last_badge_day_duration_seconds: event.last_badge_day_duration_seconds }
+                    : {}),
+                  ...(typeof event.last_badge_day_duration_human === "string" && event.last_badge_day_duration_human !== ""
+                    ? { last_badge_day_duration_human: event.last_badge_day_duration_human }
+                    : {})
+                }
+          )
+        );
+      }
     });
   }, [searchInput, activeStatusKey, dateInput]);
 
@@ -1183,7 +1538,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
         </div>
 
         {loading ? (
-          <p className="feedback">Chargement des utilisateurs...</p>
+          <UserListSkeleton />
         ) : error ? (
           <p className="feedback feedback-error">{error}</p>
         ) : users.length === 0 ? (
@@ -1331,7 +1686,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
           </div>
         </div>
         {reportsState.loading ? (
-          <p className="feedback">Chargement des rapports...</p>
+          <ReportsListSkeleton />
         ) : reportsState.error ? (
           <p className="feedback feedback-error">{reportsState.error}</p>
         ) : reportsState.items.length === 0 ? (
@@ -1367,7 +1722,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                   {isExpanded ? (
                     <div className="report-day-body">
                       {detailState?.loading ? (
-                        <p className="feedback">Chargement du détail...</p>
+                        <ReportDetailSkeleton />
                       ) : detailState?.error ? (
                         <p className="feedback feedback-error">{detailState.error}</p>
                       ) : detailState?.items?.length ? (
@@ -1422,7 +1777,6 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
   const activeMonthKey = monthKey || formatMonthKey(new Date());
   const activeMonthDate = parseMonthKey(activeMonthKey);
   const todayKey = formatDayKey(new Date());
-  const currentMonthKey = formatMonthKey(new Date());
   const monthStart = activeMonthDate instanceof Date ? new Date(activeMonthDate.getFullYear(), activeMonthDate.getMonth(), 1) : null;
   const daysInMonth = monthStart ? new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate() : 0;
   const firstWeekday = monthStart ? (monthStart.getDay() + 6) % 7 : 0;
@@ -1459,11 +1813,12 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
           className="secondary-button"
           type="button"
           onClick={() => onChangeMonth(1)}
-          disabled={activeMonthKey >= currentMonthKey}
         >
           Mois suivant
         </button>
       </div>
+
+      <CalendarDayLegend />
 
       <section className="presence-month-card presence-month-card-compact">
         <div className="presence-weekdays">
@@ -1490,6 +1845,7 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
                 )}
               </>
             );
+            const dayMeta = cell.summary ? getCalendarDayMeta(cell.summary.day_type, cell.summary.day_type_label) : null;
 
             return (
               <button
@@ -1497,6 +1853,8 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
                 type="button"
                 className={`presence-day-cell presence-day-button${
                   cell.summary ? " presence-day-has-data" : " presence-day-no-data"
+                }${
+                  dayMeta ? ` presence-day-type-${dayMeta.value}` : ""
                 }${
                   selectedDayKey === cell.dayKey ? " presence-day-selected" : ""
                 }${
@@ -1521,10 +1879,12 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
   );
 }
 
-function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
+function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary = null, onDayLoaded = null }) {
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const isToday = dayKey === formatDayKey(new Date());
+  const dayMeta = getCalendarDayMeta(selectedDaySummary?.day_type, selectedDaySummary?.day_type_label);
+  const requiredAttendanceLabel = formatRequiredAttendanceHours(selectedDaySummary?.required_attendance_hours);
 
   async function loadDay(targetDay = dayKey, options = {}) {
     const { background = false } = options;
@@ -1555,6 +1915,9 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
         throw new Error((json && json.message) || text || "Unable to load this day.");
       }
       setState({ loading: false, error: "", payload: json });
+      if (typeof onDayLoaded === "function") {
+        onDayLoaded(json, targetDay, options);
+      }
     } catch (loadError) {
       setState((current) => ({
         loading: false,
@@ -1576,23 +1939,25 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
   }, []);
 
   useEffect(() => {
-    if (!isToday) {
-      return undefined;
-    }
     return subscribeToLiveUpdates((event) => {
-      const eventLogin = (event?.login || "").trim().toLowerCase();
-      if (eventLogin !== login.trim().toLowerCase()) {
+      const eventLogin = String(event?.login || "").trim().toLowerCase();
+      if (eventLogin !== login.trim().toLowerCase() || String(event?.day || "").trim() !== dayKey) {
         return;
       }
-      if (event?.type === "badge_received") {
-        void loadDay(dayKey, { background: true });
+      if (event?.day_payload) {
+        setState((current) => ({
+          ...current,
+          loading: false,
+          error: "",
+          payload: event.day_payload
+        }));
         return;
       }
-      if (event?.type === "location_sessions_updated" && event?.day === dayKey) {
+      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
         void loadDay(dayKey, { background: true });
       }
     });
-  }, [dayEndpointBase, dayKey, isToday, login]);
+  }, [dayEndpointBase, dayKey, login]);
 
   const badgeEvents = useMemo(() => {
     const events = state.payload?.badge_events || [];
@@ -1611,15 +1976,17 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
   const firstBadgeValue = firstBadge ? formatClockTime(firstBadge.timestamp, true) : "Aucun";
   const lastBadgeValue = lastBadge ? formatClockTime(lastBadge.timestamp, true) : "Aucun";
 
+  if (state.loading) {
+    return <AdminUserDayDetailSkeleton dayKey={dayKey} />;
+  }
+
   return (
     <>
       <section className="admin-day-summary-slot">
         <div className="admin-day-heading">
           <h2>{formatLongDayLabel(dayKey)}</h2>
         </div>
-        {state.loading ? (
-          <p className="feedback">Chargement de la journée...</p>
-        ) : state.error ? (
+        {state.error ? (
           <p className="feedback feedback-error">{state.error}</p>
         ) : state.payload ? (
           <>
@@ -1627,6 +1994,8 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
               <KeyValue label="Badges" value={String(badgeEvents.length)} />
               <KeyValue label="Premier badge" value={firstBadgeValue} />
               <KeyValue label="Dernier badge" value={lastBadgeValue} />
+              <KeyValue label="Type" value={dayMeta.label} />
+              <KeyValue label="Heures attendues" value={requiredAttendanceLabel} />
               <KeyValue
                 label="Durée"
                 value={
@@ -1643,7 +2012,7 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase }) {
       </section>
 
       <section className="admin-day-timeline-slot">
-        {state.loading ? null : state.error ? null : state.payload ? (
+        {state.error ? null : state.payload ? (
           <StudentDayTimeline
             badgeEvents={badgeEvents}
             locationSessions={locationSessions}
@@ -1711,15 +2080,17 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
 
   useEffect(() => {
     return subscribeToLiveUpdates((event) => {
-      const eventLogin = (event?.login || "").trim().toLowerCase();
-      if (eventLogin !== login.trim().toLowerCase()) {
+      if (!shouldApplyLiveEvent(event, login, selectedMonthKey)) {
         return;
       }
-      if (event?.type === "badge_received") {
-        void loadUserDetail(login, { monthKey: selectedMonthKey, background: true });
+      if (event?.day_summary) {
+        setState((current) => ({
+          ...current,
+          payload: mergeLiveDetailPayload(current.payload, event)
+        }));
         return;
       }
-      if (event?.type === "location_sessions_updated" && String(event?.day || "").startsWith(selectedMonthKey)) {
+      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
         void loadUserDetail(login, { monthKey: selectedMonthKey, background: true });
       }
     });
@@ -1815,6 +2186,12 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           onChangeMonth={handleChangeMonth}
           onSelectDay={setSelectedDayKey}
           dayEndpointBase={`/api/admin/students/${encodeURIComponent(login)}`}
+          onDayLoaded={(dayPayload) => {
+            if (!dayPayload || dayPayload.live) {
+              return;
+            }
+            void loadUserDetail(login, { monthKey: selectedMonthKey, background: true });
+          }}
           adminControls={{
             isBlacklisted,
             status: getEffectiveStatus(state.payload),
@@ -1872,13 +2249,26 @@ function UserPresencePanel({
   onChangeMonth,
   onSelectDay,
   dayEndpointBase,
-  adminControls = null
+  adminControls = null,
+  onDayLoaded = null
 }) {
+  const selectedDaySummary = selectedDayKey
+    ? (payload?.days || []).find((day) => day.day === selectedDayKey) || null
+    : null;
+
+  if (loading) {
+    return (
+      <UserPresencePanelSkeleton
+        selectedDayKey={selectedDayKey}
+        selectedMonthKey={selectedMonthKey}
+        showAdminActions={Boolean(adminControls)}
+      />
+    );
+  }
+
   return (
     <section className="panel">
-      {loading ? (
-        <p className="feedback">Chargement du profil...</p>
-      ) : error ? (
+      {error ? (
         <p className="feedback feedback-error">{error}</p>
       ) : payload ? (
         <section className="user-detail-dashboard">
@@ -1946,6 +2336,8 @@ function UserPresencePanel({
               login={login}
               dayKey={selectedDayKey}
               dayEndpointBase={dayEndpointBase}
+              selectedDaySummary={selectedDaySummary}
+              onDayLoaded={onDayLoaded}
             />
           ) : (
             <section className="admin-day-summary-slot admin-day-summary-empty">
@@ -2084,14 +2476,7 @@ function App() {
   }
 
   if (authState.loading) {
-    return (
-      <main className="app-shell">
-        <section className="panel loading-panel">
-          <h1>Verification de session</h1>
-          <p>Chargement en cours...</p>
-        </section>
-      </main>
-    );
+    return <SessionLoadingSkeleton />;
   }
 
   if (authState.error) {

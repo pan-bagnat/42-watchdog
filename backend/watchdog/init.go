@@ -49,6 +49,27 @@ func init42AttendanceAPI() error {
 	return nil
 }
 
+func init42CFAAPI() error {
+	APIClient, err := apiManager.NewAPIClient(config.FTCFA, apiManager.APIClientInput{
+		AuthType:     apiManager.AuthTypePassword,
+		TokenURL:     config.ConfigData.CFA42.TokenUrl,
+		Endpoint:     config.ConfigData.CFA42.Endpoint,
+		TestPath:     config.ConfigData.CFA42.TestPath,
+		ClientID:     config.ConfigData.CFA42.Uid,
+		ClientSecret: config.ConfigData.CFA42.Secret,
+		Username:     config.ConfigData.CFA42.Username,
+		Password:     config.ConfigData.CFA42.Password,
+	})
+	if err != nil {
+		return fmt.Errorf("couldn't create CFA api client: %w", err)
+	}
+	err = APIClient.TestConnection()
+	if err != nil {
+		return fmt.Errorf("api connection test to CFA failed: %w", err)
+	}
+	return nil
+}
+
 func init42v2API() error {
 	APIClient, err := apiManager.NewAPIClient(config.FTv2, apiManager.APIClientInput{
 		AuthType:     apiManager.AuthTypeClientCredentials,
@@ -112,12 +133,17 @@ func InitAPIs() error {
 		Log(fmt.Sprintf("ERROR: %s\n", err.Error()))
 		os.Exit(1)
 	}
-	Log("[WATCHDOG] ├── ⏱️  Initializing 42 Chronos API")
+	Log("[WATCHDOG] ├── ⏱️  Initializing 42 Chronos API & CFA API")
 	err = init42AttendanceAPI()
 	if err != nil {
 		config.ConfigData.Attendance42.AutoPost = false
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: %s", err.Error()))
 		Log("[WATCHDOG] WARNING: attendance posting disabled for this runtime because Chronos is unavailable")
+	}
+	err = init42CFAAPI()
+	if err != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: %s", err.Error()))
+		Log("[WATCHDOG] WARNING: CFA integration disabled for this runtime because the CFA API is unavailable")
 	}
 	Log("[WATCHDOG] ├─ 🛠️  Initializing Other Services")
 	Log("[WATCHDOG] ├── ✉️  Initializing Mailer")
