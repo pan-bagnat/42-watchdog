@@ -486,16 +486,24 @@ func postAttendanceForUser(user *User) {
 		return
 	}
 
+	dayKey := dayKeyInParis(user.FirstAccess)
+	if dayKey == "" {
+		dayKey = currentRuntimeDayKey()
+	}
+	calendarDay, calendarErr := loadStudentCalendarDay(user.Login42, dayKey)
+	if calendarErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s before posting: %v", user.Login42, dayKey, calendarErr))
+	} else if !isSchoolDayType(calendarDay.DayType) {
+		user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
+		user.Error = fmt.Errorf("apprentice is not on a school day")
+		return
+	}
+
 	payload, err := buildAttendancePayload(*user)
 	if err != nil {
 		user.PostResult = POST_ERROR
 		user.Error = err
 		return
-	}
-
-	dayKey := dayKeyInParis(user.FirstAccess)
-	if dayKey == "" {
-		dayKey = currentRuntimeDayKey()
 	}
 
 	if !config.ConfigData.Attendance42.AutoPost {
@@ -721,6 +729,15 @@ func postApprenticesAttendancesLocked() {
 		Log("[WATCHDOG] [POST] ├──────── Apprentices: Blacklisted")
 		for _, user := range sortedUser[POST_SKIPPED_BLACKLIST] {
 			Log(formatPostInfo(user, parisLoc, "Apprentice is blacklisted"))
+			addLogToMail(&htmlBody, user, parisLoc)
+		}
+		atLeastOneField = true
+	}
+
+	if len(sortedUser[POST_SKIPPED_NOT_SCHOOL_DAY]) > 0 {
+		Log("[WATCHDOG] [POST] ├──────── Apprentices: Not on a school day")
+		for _, user := range sortedUser[POST_SKIPPED_NOT_SCHOOL_DAY] {
+			Log(formatPostInfo(user, parisLoc, "Apprentice is not on a school day"))
 			addLogToMail(&htmlBody, user, parisLoc)
 		}
 		atLeastOneField = true

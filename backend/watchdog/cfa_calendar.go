@@ -110,6 +110,33 @@ func defaultStudentCalendarDay(dayKey string) StudentCalendarDay {
 	}
 }
 
+func isSchoolDayType(dayType string) bool {
+	switch strings.TrimSpace(dayType) {
+	case DayTypeOnSiteSchool, DayTypeOffSiteSchool:
+		return true
+	default:
+		return false
+	}
+}
+
+func loadStudentCalendarDay(login, dayKey string) (StudentCalendarDay, error) {
+	trimmedDayKey := strings.TrimSpace(dayKey)
+	defaultDay := defaultStudentCalendarDay(trimmedDayKey)
+	if len(trimmedDayKey) < len("2006-01") {
+		return defaultDay, nil
+	}
+
+	monthKey := trimmedDayKey[:len("2006-01")]
+	calendar, err := loadStudentCalendarMonth(login, monthKey)
+	if err != nil {
+		return defaultDay, err
+	}
+	if day, ok := calendar[trimmedDayKey]; ok {
+		return day, nil
+	}
+	return defaultDay, nil
+}
+
 func isWeekendDayKey(dayKey string) bool {
 	parsed, err := time.ParseInLocation("2006-01-02", dayKey, parisLocation())
 	if err != nil {

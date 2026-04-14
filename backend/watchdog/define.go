@@ -12,13 +12,14 @@ const (
 	BADGED_ONCE    string = "User badge only once"
 	NOT_APPRENTICE string = "User is not an apprentice"
 
-	APPRENTICE_NO_BADGE    string = "Apprentice didn't badged today"
-	APPRENTICE_BADGED_ONCE string = "Apprentice badged only once"
-	POSTED                 string = "Posted"
-	POST_ERROR             string = "Post returned an error"
-	POST_OFF               string = "AUTOPOST is off"
-	POST_SKIPPED_BLACKLIST string = "Skipped because user is blacklisted"
-	POST_SKIPPED_DISABLED  string = "Skipped because badge posting is disabled"
+	APPRENTICE_NO_BADGE         string = "Apprentice didn't badged today"
+	APPRENTICE_BADGED_ONCE      string = "Apprentice badged only once"
+	POSTED                      string = "Posted"
+	POST_ERROR                  string = "Post returned an error"
+	POST_OFF                    string = "AUTOPOST is off"
+	POST_SKIPPED_BLACKLIST      string = "Skipped because user is blacklisted"
+	POST_SKIPPED_DISABLED       string = "Skipped because badge posting is disabled"
+	POST_SKIPPED_NOT_SCHOOL_DAY string = "Skipped because apprentice is not on a school day"
 )
 
 type User struct {

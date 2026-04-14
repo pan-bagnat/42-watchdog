@@ -3908,6 +3908,8 @@ func PopulateUserPostResult(user *User, posts []AttendancePostRecord) {
 			user.PostResult = POST_SKIPPED_BLACKLIST
 		case "badge posting is disabled":
 			user.PostResult = POST_SKIPPED_DISABLED
+		case "apprentice is not on a school day":
+			user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
 		default:
 			user.PostResult = POST_ERROR
 		}
