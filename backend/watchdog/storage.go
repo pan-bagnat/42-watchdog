@@ -1605,7 +1605,11 @@ func loadBadgeEventsForLogin(dayKey, login string) ([]BadgeEvent, error) {
 			DoorName:  doorName,
 		})
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	Trace("CACHE", "badge events DB load for %s on %s: %d events", login, dayKey, len(events))
+	return events, nil
 }
 
 func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error) {
@@ -1936,6 +1940,7 @@ func loadHistoricalLocationDaySummaries(login, monthKey string) (map[string]Stud
 		}
 		fetchedDays[dayKey] = summary
 	}
+	Trace("CACHE", "historical location summaries load for %s on %s: fetched_days=%d", login, monthKey, len(fetchedDays))
 
 	return fetchedDays, nil
 }
@@ -1982,7 +1987,11 @@ func loadHistoricalAttendanceBoundsByLogin(login, monthKey string) (map[string]*
 			Source:  source,
 		}
 	}
-	return boundsByDay, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	Trace("CACHE", "historical attendance bounds load for %s on %s: %d days", login, monthKey, len(boundsByDay))
+	return boundsByDay, nil
 }
 
 func loadHistoricalAttendanceFetchedDays(login, monthKey string) (map[string]struct{}, error) {
@@ -2010,7 +2019,11 @@ func loadHistoricalAttendanceFetchedDays(login, monthKey string) (map[string]str
 		}
 		fetchedDays[dayKey] = struct{}{}
 	}
-	return fetchedDays, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	Trace("CACHE", "historical attendance fetched markers for %s on %s: %d days", login, monthKey, len(fetchedDays))
+	return fetchedDays, nil
 }
 
 func ensureHistoricalMonthFetchWorkers() {
@@ -2035,6 +2048,7 @@ func finishHistoricalMonthFetch(key string) {
 func processHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
 	key := login + "|" + monthKey
 	defer finishHistoricalMonthFetch(key)
+	Trace("API", "historical monthly fetch start for %s on %s: requested_day_count=%d", login, monthKey, len(dayKeys))
 
 	locationDays, locationErr := fetchLocationSessionsForMonth(login, monthKey)
 	if locationErr != nil {
@@ -2046,6 +2060,7 @@ func processHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
 	if attendanceErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical monthly attendances for %s on %s: %v", login, monthKey, attendanceErr))
 	}
+	Trace("BUILD", "historical monthly fetch payload for %s on %s: location_days=%d attendance_days=%d", login, monthKey, len(locationDays), len(attendanceDays))
 
 	for _, dayKey := range dayKeys {
 		sessions := locationDays[dayKey]
@@ -2064,9 +2079,16 @@ func processHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
 				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist historical attendances for %s on %s: %v", login, dayKey, err))
 				continue
 			}
+		} else if len(badgeEvents) > 0 {
+			if err := replaceHistoricalAttendanceBounds(dayKey, login, nil); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not mark historical attendance fetch for %s on %s: %v", login, dayKey, err))
+				continue
+			}
 		}
-		NotifyLocationSessionsUpdate(login, dayKey)
+		Trace("CACHE", "historical monthly fetch stored for %s on %s: sessions=%d attendance_bounds=%t badge_events=%d", login, dayKey, len(sessions), attendanceDays[dayKey] != nil, len(badgeEvents))
 	}
+	NotifyLocationMonthUpdate(login, monthKey)
+	Trace("API", "historical monthly fetch done for %s on %s", login, monthKey)
 }
 
 func enqueueHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
@@ -2082,6 +2104,7 @@ func enqueueHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
 	historicalMonthFetchesMu.Lock()
 	if _, ok := historicalMonthFetchesInFlight[key]; ok {
 		historicalMonthFetchesMu.Unlock()
+		Trace("CACHE", "historical monthly fetch already running for %s on %s", login, monthKey)
 		return
 	}
 	historicalMonthFetchesInFlight[key] = struct{}{}
@@ -2094,6 +2117,7 @@ func enqueueHistoricalMonthFetch(login, monthKey string, dayKeys []string) {
 	}
 	select {
 	case historicalMonthFetchQueue <- task:
+		Trace("CACHE", "historical monthly fetch enqueued for %s on %s: %d day(s)", login, monthKey, len(dayKeys))
 	default:
 		finishHistoricalMonthFetch(key)
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: skipped historical monthly fetch for %s on %s because the queue is full", login, monthKey))
@@ -2132,6 +2156,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 	if trimmedMonthKey == "" {
 		trimmedMonthKey = todayDayKeyInParis()[:7]
 	}
+	Trace("BUILD", "student attendance days load start for %s on %s", login, trimmedMonthKey)
 	monthPattern := monthKeyLikePattern(trimmedMonthKey)
 	rows, err := storageQuery(`
 		SELECT day_key, first_access, last_access, retained_duration_seconds, status
@@ -2174,6 +2199,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	Trace("CACHE", "daily student summaries load for %s on %s: %d rows", login, trimmedMonthKey, len(dayMap))
 
 	historicalLocationDays, err := loadHistoricalLocationDaySummaries(login, trimmedMonthKey)
 	if err != nil {
@@ -2195,6 +2221,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 		}
 		dayMap[dayKey] = summary
 	}
+	Trace("BUILD", "student attendance days after historical locations for %s on %s: %d days", login, trimmedMonthKey, len(dayMap))
 
 	historicalAttendanceBoundsByDay, err := loadHistoricalAttendanceBoundsByLogin(login, trimmedMonthKey)
 	if err != nil {
@@ -2239,6 +2266,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 		}
 		dayMap[dayKey] = existing
 	}
+	Trace("BUILD", "student attendance days after attendance fallback merge for %s on %s: %d days", login, trimmedMonthKey, len(dayMap))
 
 	historicalAttendanceFetchedDays, err := loadHistoricalAttendanceFetchedDays(login, trimmedMonthKey)
 	if err != nil {
@@ -2292,6 +2320,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 			}
 		}
 		dayMap[currentDayKey] = currentDaySummary
+		Trace("BUILD", "student attendance current day merged for %s on %s: badge_events=%d location_sessions=%d attendance_bounds=%t", login, currentDayKey, len(currentBadgeEvents), len(currentLocationSessions), currentAttendanceBounds != nil)
 	}
 	if trimmedMonthKey != "" {
 		dayKeys, err := monthDayKeys(trimmedMonthKey)
@@ -2316,6 +2345,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 			}
 			dayMap[dayKey] = summary
 		}
+		Trace("BUILD", "student attendance missing historical days for %s on %s: %d day(s) scheduled", login, trimmedMonthKey, len(missingHistoricalDayKeys))
 		enqueueHistoricalMonthFetch(login, trimmedMonthKey, missingHistoricalDayKeys)
 
 		calendarByDay, err := loadStudentCalendarMonth(login, trimmedMonthKey)
@@ -2336,6 +2366,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 			summary.RequiredAttendanceHours = calendarDay.RequiredAttendanceHours
 			dayMap[dayKey] = summary
 		}
+		Trace("BUILD", "student attendance CFA merge for %s on %s: %d calendar days", login, trimmedMonthKey, len(calendarByDay))
 	}
 
 	allowedDayKeys := map[string]struct{}{}
@@ -2362,6 +2393,7 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 	sort.Slice(days, func(i, j int) bool {
 		return days[i].DayKey > days[j].DayKey
 	})
+	Trace("BUILD", "student attendance days load done for %s on %s: %d returned days", login, trimmedMonthKey, len(days))
 
 	return days, nil
 }
@@ -2424,6 +2456,67 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 		users = append(users, user)
 	}
 	return users, rows.Err()
+}
+
+func loadLatestHistoricalAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
+	if storageDB == nil {
+		return AdminUserSummary{}, false, nil
+	}
+
+	login = normalizeLogin(login)
+	var user AdminUserSummary
+	var isApprentice int
+	var profile int
+	var statusOverridden int
+	var lastBadgeAt sql.NullString
+	var durationSeconds int64
+	var isBlacklisted int
+	var badgePostingOff int
+
+	err := storageQueryRow(`
+		SELECT
+			summaries.login_42,
+			summaries.is_apprentice,
+			summaries.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			COALESCE(summaries.last_access, summaries.first_access),
+			summaries.retained_duration_seconds,
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_daily_student_summaries AS summaries
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = summaries.login_42
+		WHERE summaries.login_42 = ?
+		ORDER BY COALESCE(summaries.last_access, summaries.first_access) DESC NULLS LAST, summaries.day_key DESC
+		LIMIT 1
+	`, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	if err == sql.ErrNoRows {
+		return AdminUserSummary{}, false, nil
+	}
+	if err != nil {
+		return AdminUserSummary{}, false, err
+	}
+
+	user.IsApprentice = isApprentice == 1
+	user.Profile = ProfileType(profile)
+	user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+	user.StatusOverridden = statusOverridden == 1
+	user.IsBlacklisted = isBlacklisted == 1
+	user.BadgePostingOff = badgePostingOff == 1
+	user.DayDuration = time.Duration(durationSeconds) * time.Second
+	if lastBadgeAt.Valid {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, lastBadgeAt.String)
+		if parseErr != nil {
+			return AdminUserSummary{}, false, parseErr
+		}
+		user.LastBadgeAt = parsed
+	}
+
+	return user, true, nil
 }
 
 func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
@@ -2515,6 +2608,97 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 	return users, rows.Err()
 }
 
+func loadCurrentAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
+	if storageDB == nil {
+		return AdminUserSummary{}, false, nil
+	}
+
+	login = normalizeLogin(login)
+	dayKey := currentRuntimeDayKey()
+
+	var user AdminUserSummary
+	var isApprentice int
+	var profile int
+	var statusOverridden int
+	var firstAccess sql.NullString
+	var lastBadgeAt sql.NullString
+	var durationSeconds int64
+	var isBlacklisted int
+	var badgePostingOff int
+
+	err := storageQueryRow(`
+		SELECT
+			current_users.login_42,
+			current_users.is_apprentice,
+			current_users.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			current_users.first_access,
+			COALESCE(current_users.last_access, current_users.first_access),
+			current_users.duration_seconds,
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_current_users AS current_users
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = current_users.login_42
+		WHERE current_users.day_key = ?
+			AND current_users.login_42 = ?
+			AND COALESCE(current_users.last_access, current_users.first_access) IS NOT NULL
+		ORDER BY COALESCE(current_users.last_access, current_users.first_access) DESC NULLS LAST, current_users.updated_at DESC
+		LIMIT 1
+	`, dayKey, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	if err == sql.ErrNoRows {
+		return AdminUserSummary{}, false, nil
+	}
+	if err != nil {
+		return AdminUserSummary{}, false, err
+	}
+
+	user.IsApprentice = isApprentice == 1
+	user.Profile = ProfileType(profile)
+	user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+	user.StatusOverridden = statusOverridden == 1
+	user.IsBlacklisted = isBlacklisted == 1
+	user.BadgePostingOff = badgePostingOff == 1
+	user.DayDuration = time.Duration(durationSeconds) * time.Second
+
+	var firstAccessTime time.Time
+	if firstAccess.Valid {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, firstAccess.String)
+		if parseErr != nil {
+			return AdminUserSummary{}, false, parseErr
+		}
+		firstAccessTime = parsed
+	}
+	if lastBadgeAt.Valid {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, lastBadgeAt.String)
+		if parseErr != nil {
+			return AdminUserSummary{}, false, parseErr
+		}
+		user.LastBadgeAt = parsed
+	}
+
+	badgeEvents, err := loadBadgeEventsForLogin(dayKey, user.Login42)
+	if err != nil {
+		return AdminUserSummary{}, false, err
+	}
+	locationSessions, _ := SnapshotDailyLocationSessionsOrSchedule(user.Login42)
+	attendanceBounds, _ := SnapshotDailyAttendanceBoundsOrSchedule(user.Login42)
+	effectiveBadgeEvents := applyAttendanceBoundsFallback(badgeEvents, attendanceBounds)
+	recalculatedDuration := CombinedRetainedDuration(effectiveBadgeEvents, firstAccessTime, user.LastBadgeAt, locationSessions)
+	if recalculatedDuration > user.DayDuration {
+		user.DayDuration = recalculatedDuration
+	}
+	if user.LastBadgeAt.IsZero() && len(effectiveBadgeEvents) > 0 {
+		user.LastBadgeAt = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
+	}
+
+	return user, true, nil
+}
+
 func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
 	if storageDB == nil {
 		return nil, nil
@@ -2562,6 +2746,54 @@ func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
 		users = append(users, user)
 	}
 	return users, rows.Err()
+}
+
+func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, error) {
+	if storageDB == nil {
+		return AdminUserSummary{}, false, nil
+	}
+
+	login = normalizeLogin(login)
+	var user AdminUserSummary
+	var isApprentice int
+	var profile int
+	var statusOverridden int
+	var isBlacklisted int
+	var badgePostingOff int
+
+	err := storageQueryRow(`
+		SELECT
+			profiles.login_42,
+			profiles.is_apprentice,
+			profiles.profile,
+			COALESCE(users.status, ''),
+			COALESCE(users.status_42, ''),
+			COALESCE(users.status_overridden, 0),
+			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.badge_posting_off, 0),
+			COALESCE(users.blacklist_reason, '')
+		FROM watchdog_day_profiles AS profiles
+		LEFT JOIN watchdog_users AS users
+			ON users.login_42 = profiles.login_42
+		WHERE profiles.day_key = ? AND profiles.login_42 = ?
+		LIMIT 1
+	`, currentRuntimeDayKey(), login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	if err == sql.ErrNoRows {
+		return AdminUserSummary{}, false, nil
+	}
+	if err != nil {
+		return AdminUserSummary{}, false, err
+	}
+
+	user.IsApprentice = isApprentice == 1
+	user.Profile = ProfileType(profile)
+	user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+	user.StatusOverridden = statusOverridden == 1
+	user.IsBlacklisted = isBlacklisted == 1
+	user.BadgePostingOff = badgePostingOff == 1
+
+	return user, true, nil
 }
 
 func loadActiveLoginsForDay(dayKey string) (map[string]struct{}, error) {
@@ -2743,7 +2975,11 @@ func loadHistoricalLocationSessions(dayKey, login string) ([]LocationSession, er
 			Ongoing: ongoing == 1,
 		})
 	}
-	return sessions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	Trace("CACHE", "historical locations DB load for %s on %s: %d sessions", login, dayKey, len(sessions))
+	return sessions, nil
 }
 
 func loadHistoricalAttendanceBounds(dayKey, login string) (*AttendanceBounds, error) {
@@ -2763,6 +2999,7 @@ func loadHistoricalAttendanceBounds(dayKey, login string) (*AttendanceBounds, er
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(&beginAtRaw, &endAtRaw, &source)
 	if err == sql.ErrNoRows {
+		Trace("CACHE", "historical attendance bounds DB miss for %s on %s", login, dayKey)
 		return nil, nil
 	}
 	if err != nil {
@@ -2777,11 +3014,13 @@ func loadHistoricalAttendanceBounds(dayKey, login string) (*AttendanceBounds, er
 	if err != nil {
 		return nil, err
 	}
-	return &AttendanceBounds{
+	bounds := &AttendanceBounds{
 		BeginAt: beginAt,
 		EndAt:   endAt,
 		Source:  source,
-	}, nil
+	}
+	Trace("CACHE", "historical attendance bounds DB load for %s on %s: %s source=%s", login, dayKey, traceBounds(bounds.BeginAt, bounds.EndAt), bounds.Source)
+	return bounds, nil
 }
 
 func historicalLocationSessionsFetched(dayKey, login string) (bool, error) {
@@ -2872,7 +3111,11 @@ func replaceHistoricalLocationSessions(dayKey, login string, sessions []Location
 		return err
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	Trace("CACHE", "historical locations DB store for %s on %s: %d sessions", login, dayKey, len(sessions))
+	return nil
 }
 
 func replaceHistoricalAttendanceBounds(dayKey, login string, bounds *AttendanceBounds) (err error) {
@@ -2920,7 +3163,11 @@ func replaceHistoricalAttendanceBounds(dayKey, login string, bounds *AttendanceB
 		return err
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	Trace("CACHE", "historical attendance bounds DB store for %s on %s: present=%t", login, dayKey, bounds != nil)
+	return nil
 }
 
 func syntheticHistoricalStudentDay(login, dayKey string, sessions []LocationSession, attendanceBounds *AttendanceBounds) (HistoricalStudentDay, error) {
@@ -3402,8 +3649,14 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 
 func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bool, error) {
 	ensureRuntimeDayState()
+	Trace("BUILD", "historical student day load start for %s on %s", login, dayKey)
 	record, ok, err := loadHistoricalStudentDay(login, dayKey)
 	if err != nil || ok {
+		if err != nil {
+			Trace("BUILD", "historical student day load aborted for %s on %s: %v", login, dayKey, err)
+		} else {
+			Trace("CACHE", "historical student day summary hit for %s on %s", login, dayKey)
+		}
 		return record, ok, err
 	}
 
@@ -3431,15 +3684,23 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 	}
 
 	if locationFetched && (attendanceFetched || len(badgeEvents) > 0) {
+		if len(badgeEvents) > 0 && !attendanceFetched {
+			if err := replaceHistoricalAttendanceBounds(dayKey, login, nil); err != nil {
+				return HistoricalStudentDay{}, false, err
+			}
+			attendanceFetched = true
+		}
 		record, err := syntheticHistoricalStudentDay(login, dayKey, cachedSessions, cachedAttendanceBounds)
 		if err != nil {
 			return HistoricalStudentDay{}, false, err
 		}
+		Trace("CACHE", "historical student day synthesized fully from cache for %s on %s: sessions=%d attendance_bounds=%t badge_events=%d", login, dayKey, len(cachedSessions), cachedAttendanceBounds != nil, len(badgeEvents))
 		return record, true, nil
 	}
 
 	needLocations := !locationFetched
 	needAttendance := !attendanceFetched && len(badgeEvents) == 0
+	Trace("API", "historical student day fetch decision for %s on %s: needLocations=%t needAttendance=%t", login, dayKey, needLocations, needAttendance)
 	locationSessions, attendanceBounds, locationErr, attendanceErr := fetchSupplementalDayData(login, dayKey, needLocations, needAttendance)
 	if locationErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, locationErr))
@@ -3447,6 +3708,7 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 		if synthErr != nil {
 			return HistoricalStudentDay{}, false, synthErr
 		}
+		Trace("CACHE", "historical student day fallback to stale cache for %s on %s after location fetch error", login, dayKey)
 		return record, true, nil
 	}
 	if needLocations {
@@ -3463,6 +3725,10 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 		} else {
 			cachedAttendanceBounds = attendanceBounds
 		}
+	} else if len(badgeEvents) > 0 && !attendanceFetched {
+		if err := replaceHistoricalAttendanceBounds(dayKey, login, nil); err != nil {
+			return HistoricalStudentDay{}, false, err
+		}
 	}
 	NotifyLocationSessionsUpdate(login, dayKey)
 
@@ -3470,6 +3736,7 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
 	}
+	Trace("BUILD", "historical student day load done for %s on %s: sessions=%d attendance_bounds=%t badge_events=%d", login, dayKey, len(cachedSessions), cachedAttendanceBounds != nil, len(badgeEvents))
 	return record, true, nil
 }
 
@@ -3524,16 +3791,35 @@ func DailyReportSummaries() ([]DailyReportSummary, error) {
 }
 
 func AdminUserByLogin(login string) (AdminUserSummary, bool, error) {
-	users, err := AdminUsers(login, nil, "")
-	if err != nil {
+	ensureRuntimeDayState()
+	login = normalizeLogin(login)
+	if login == "" {
+		return AdminUserSummary{}, false, nil
+	}
+
+	var (
+		user  AdminUserSummary
+		found bool
+		err   error
+	)
+
+	if user, found, err = loadLatestHistoricalAdminUserByLogin(login); err != nil {
 		return AdminUserSummary{}, false, err
 	}
-	for _, user := range users {
-		if normalizeLogin(user.Login42) == normalizeLogin(login) {
-			return user, true, nil
-		}
+	if currentProfile, ok, profileErr := loadCurrentAdminDayProfileByLogin(login); profileErr != nil {
+		return AdminUserSummary{}, false, profileErr
+	} else if ok {
+		user = currentProfile
+		found = true
 	}
-	return AdminUserSummary{}, false, nil
+	if currentUser, ok, currentErr := loadCurrentAdminUserByLogin(login); currentErr != nil {
+		return AdminUserSummary{}, false, currentErr
+	} else if ok {
+		user = currentUser
+		found = true
+	}
+
+	return user, found, nil
 }
 
 func normalizeLogin(login string) string {

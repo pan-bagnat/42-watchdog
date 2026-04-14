@@ -108,9 +108,11 @@ func fetchDailyLocationSessions(login string) ([]LocationSession, error) {
 func fetchDailySupplementalData(login, dayKey string) ([]LocationSession, *AttendanceBounds, error, error) {
 	badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
 	if err != nil {
+		Trace("BUILD", "daily supplemental data for %s on %s: badge lookup failed, fetching locations only before falling back to error: %v", login, dayKey, err)
 		locationSessions, _, locationErr, _ := fetchSupplementalDayData(login, dayKey, true, false)
 		return locationSessions, nil, locationErr, err
 	}
+	Trace("BUILD", "daily supplemental data for %s on %s: %d persisted badge events found, needAttendance=%t", login, dayKey, len(badgeEvents), len(badgeEvents) == 0)
 	return fetchSupplementalDayData(login, dayKey, true, len(badgeEvents) == 0)
 }
 
@@ -127,11 +129,14 @@ func fetchLocationSessionsForRange(login string, dayStart, dayEnd time.Time) ([]
 	query.Set("range[begin_at]", dayStart.UTC().Format(time.RFC3339)+","+dayEnd.UTC().Format(time.RFC3339))
 
 	path := fmt.Sprintf("/users/%s/locations?%s", url.PathEscape(login), query.Encode())
+	Trace("API", "GET %s: login=%s window=%s", path, login, traceBounds(dayStart, dayEnd))
 	resp, err := apiManager.GetClient(config.FTv2).Get(path)
 	if err != nil {
+		Trace("API", "GET %s: login=%s failed: %v", path, login, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	Trace("API", "GET %s: login=%s status=%s", path, login, resp.Status)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("42 API returned %s", resp.Status)
@@ -146,6 +151,7 @@ func fetchLocationSessionsForRange(login string, dayStart, dayEnd time.Time) ([]
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
+	Trace("BUILD", "locations payload for %s on %s: %d raw records", login, traceBounds(dayStart, dayEnd), len(payload))
 
 	now := time.Now()
 	sessions := make([]LocationSession, 0, len(payload))
@@ -197,6 +203,11 @@ func fetchLocationSessionsForRange(login string, dayStart, dayEnd time.Time) ([]
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].BeginAt.Before(sessions[j].BeginAt)
 	})
+	if len(sessions) == 0 {
+		Trace("BUILD", "locations built for %s on %s: no retained sessions", login, traceBounds(dayStart, dayEnd))
+	} else {
+		Trace("BUILD", "locations built for %s on %s: %d sessions, first=%s, last=%s", login, traceBounds(dayStart, dayEnd), len(sessions), traceBounds(sessions[0].BeginAt, sessions[0].EndAt), traceBounds(sessions[len(sessions)-1].BeginAt, sessions[len(sessions)-1].EndAt))
+	}
 	return sessions, nil
 }
 
@@ -205,6 +216,7 @@ func fetchLocationSessionsForMonth(login string, monthKey string) (map[string][]
 	if err != nil {
 		return nil, err
 	}
+	Trace("API", "monthly locations fetch requested for %s on %s (%s)", login, monthKey, traceBounds(monthStart, monthEnd))
 
 	sessions, err := fetchLocationSessionsForRange(login, monthStart, monthEnd)
 	if err != nil {
@@ -219,6 +231,7 @@ func fetchLocationSessionsForMonth(login string, monthKey string) (map[string][]
 		}
 		grouped[dayKey] = append(grouped[dayKey], session)
 	}
+	Trace("BUILD", "monthly locations built for %s on %s: %d days from %d sessions", login, monthKey, len(grouped), len(sessions))
 	return grouped, nil
 }
 
@@ -234,12 +247,16 @@ func SnapshotDailyLocationSessions(login string) []LocationSession {
 	ensureDailyLocationSessionsLocked()
 	if cached, ok := dailyLocationSessions[login]; ok && now.Sub(cached.FetchedAt) < dailyLocationSessionsTTL {
 		sessions := cloneLocationSessions(cached.Sessions)
+		Trace("CACHE", "daily locations snapshot hit for %s: %d sessions cached_at=%s age=%s", login, len(sessions), traceTime(cached.FetchedAt), now.Sub(cached.FetchedAt).Round(time.Second))
 		dailyLocationSessionsMutex.Unlock()
 		return sessions
 	}
 	staleSessions := []LocationSession(nil)
 	if cached, ok := dailyLocationSessions[login]; ok {
 		staleSessions = cloneLocationSessions(cached.Sessions)
+		Trace("CACHE", "daily locations snapshot stale for %s: %d sessions cached_at=%s age=%s", login, len(staleSessions), traceTime(cached.FetchedAt), now.Sub(cached.FetchedAt).Round(time.Second))
+	} else {
+		Trace("CACHE", "daily locations snapshot miss for %s", login)
 	}
 	dailyLocationSessionsMutex.Unlock()
 
@@ -264,10 +281,12 @@ func SnapshotDailyLocationSessions(login string) []LocationSession {
 		Sessions:         cloneLocationSessions(sessions),
 		AttendanceBounds: cloneAttendanceBounds(attendanceBounds),
 	}
+	Trace("CACHE", "daily locations snapshot store for %s: %d sessions attendance_bounds=%t", login, len(sessions), attendanceBounds != nil)
 	return cloneLocationSessions(sessions)
 }
 
 func refreshDailyLocationSessionsAsync(login, dayKey string) {
+	Trace("CACHE", "async refresh start for %s on %s", login, dayKey)
 	sessions, attendanceBounds, err, attendanceErr := fetchDailySupplementalData(login, dayKey)
 	now := time.Now()
 	shouldNotify := false
@@ -286,6 +305,7 @@ func refreshDailyLocationSessionsAsync(login, dayKey string) {
 		entry.Refreshing = false
 		dailyLocationSessions[login] = entry
 		shouldNotify = true
+		Trace("CACHE", "async refresh failed for %s on %s, stale cache kept", login, dayKey)
 	} else {
 		if attendanceErr != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refresh Chronos attendance fallback for %s: %v", login, attendanceErr))
@@ -298,6 +318,7 @@ func refreshDailyLocationSessionsAsync(login, dayKey string) {
 			Refreshing:       false,
 		}
 		shouldNotify = true
+		Trace("CACHE", "async refresh stored for %s on %s: %d sessions attendance_bounds=%t", login, dayKey, len(sessions), attendanceBounds != nil)
 	}
 	dailyLocationSessionsMutex.Unlock()
 
@@ -321,14 +342,21 @@ func SnapshotDailyLocationSessionsOrSchedule(login string) ([]LocationSession, b
 	entry, ok := dailyLocationSessions[login]
 	if ok && !entry.Refreshing && !entry.FetchedAt.IsZero() && now.Sub(entry.FetchedAt) < dailyLocationSessionsTTL {
 		sessions := cloneLocationSessions(entry.Sessions)
+		Trace("CACHE", "daily locations schedule hit for %s: %d sessions cached_at=%s age=%s", login, len(sessions), traceTime(entry.FetchedAt), now.Sub(entry.FetchedAt).Round(time.Second))
 		dailyLocationSessionsMutex.Unlock()
 		return sessions, false
 	}
 
 	staleSessions := cloneLocationSessions(entry.Sessions)
 	if ok && entry.Refreshing {
+		Trace("CACHE", "daily locations schedule refresh already running for %s: returning %d stale sessions", login, len(staleSessions))
 		dailyLocationSessionsMutex.Unlock()
 		return staleSessions, true
+	}
+	if ok {
+		Trace("CACHE", "daily locations schedule stale for %s: returning %d stale sessions and starting refresh", login, len(staleSessions))
+	} else {
+		Trace("CACHE", "daily locations schedule miss for %s: starting refresh", login)
 	}
 
 	dailyLocationSessions[login] = locationSessionsCacheEntry{
@@ -357,14 +385,21 @@ func SnapshotDailyAttendanceBoundsOrSchedule(login string) (*AttendanceBounds, b
 	entry, ok := dailyLocationSessions[login]
 	if ok && !entry.Refreshing && !entry.FetchedAt.IsZero() && now.Sub(entry.FetchedAt) < dailyLocationSessionsTTL {
 		bounds := cloneAttendanceBounds(entry.AttendanceBounds)
+		Trace("CACHE", "daily attendance bounds hit for %s: cached_at=%s age=%s present=%t", login, traceTime(entry.FetchedAt), now.Sub(entry.FetchedAt).Round(time.Second), bounds != nil)
 		dailyLocationSessionsMutex.Unlock()
 		return bounds, false
 	}
 
 	staleBounds := cloneAttendanceBounds(entry.AttendanceBounds)
 	if ok && entry.Refreshing {
+		Trace("CACHE", "daily attendance bounds refresh already running for %s: present=%t", login, staleBounds != nil)
 		dailyLocationSessionsMutex.Unlock()
 		return staleBounds, true
+	}
+	if ok {
+		Trace("CACHE", "daily attendance bounds stale for %s: present=%t, starting refresh", login, staleBounds != nil)
+	} else {
+		Trace("CACHE", "daily attendance bounds miss for %s: starting refresh", login)
 	}
 
 	dailyLocationSessions[login] = locationSessionsCacheEntry{

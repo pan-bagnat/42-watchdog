@@ -499,8 +499,8 @@ function mergeDaySummary(days, nextSummary) {
       ...day,
       ...nextSummary,
       loading: false,
-      day_type: nextSummary.day_type ?? day.day_type,
-      day_type_label: nextSummary.day_type_label ?? day.day_type_label,
+      day_type: nextSummary.day_type || day.day_type,
+      day_type_label: nextSummary.day_type_label || day.day_type_label,
       required_attendance_hours:
         nextSummary.required_attendance_hours ?? day.required_attendance_hours
     };
@@ -515,7 +515,13 @@ function mergeDaySummary(days, nextSummary) {
 }
 
 function mergeLiveDetailPayload(payload, event) {
-  if (!payload || !event?.day_summary) {
+  if (!payload) {
+    return payload;
+  }
+  if (event?.month_payload) {
+    return event.month_payload;
+  }
+  if (!event?.day_summary) {
     return payload;
   }
 
@@ -541,8 +547,12 @@ function shouldApplyLiveEvent(event, login, monthKey) {
   const eventLogin = String(event?.login || "").trim().toLowerCase();
   const targetLogin = String(login || "").trim().toLowerCase();
   const eventDay = String(event?.day || "").trim();
+  const eventMonth = String(event?.month || "").trim();
   const targetMonth = String(monthKey || "").trim();
-  return eventLogin !== "" && eventLogin === targetLogin && eventDay.startsWith(`${targetMonth}-`);
+  return eventLogin !== "" && eventLogin === targetLogin && (
+    eventMonth === targetMonth ||
+    eventDay.startsWith(`${targetMonth}-`)
+  );
 }
 
 function BadgeDelayChip({ seconds }) {
@@ -1271,21 +1281,39 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [selectedDayKey, setSelectedDayKey] = useState(() => formatDayKey(new Date()));
   const [selectedMonthKey, setSelectedMonthKey] = useState(() => formatMonthKey(new Date()));
+  const monthRequestRef = useRef(0);
+  const monthAbortRef = useRef(null);
 
   async function loadSelfDetail(options = {}) {
     const { monthKey = selectedMonthKey || formatMonthKey(new Date()), background = false } = options;
+    monthAbortRef.current?.abort();
+    const controller = new AbortController();
+    monthAbortRef.current = controller;
+    const requestId = monthRequestRef.current + 1;
+    monthRequestRef.current = requestId;
     if (!background) {
       setState((current) => ({ ...current, loading: true, error: "" }));
     }
     try {
       const query = new URLSearchParams();
       query.set("month", monthKey);
-      const { response, json, text } = await requestJSON(`/api/student/detail?${query.toString()}`);
+      const { response, json, text } = await requestJSON(`/api/student/detail?${query.toString()}`, {
+        signal: controller.signal
+      });
+      if (requestId !== monthRequestRef.current) {
+        return;
+      }
       if (!response.ok) {
         throw new Error((json && json.message) || text || "Unable to load your profile.");
       }
       setState({ loading: false, error: "", payload: json });
     } catch (loadError) {
+      if (loadError instanceof Error && loadError.name === "AbortError") {
+        return;
+      }
+      if (requestId !== monthRequestRef.current) {
+        return;
+      }
       setState((current) => ({
         loading: false,
         error: loadError instanceof Error ? loadError.message : String(loadError),
@@ -1299,27 +1327,41 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
   }, [selectedMonthKey]);
 
   useEffect(() => {
+    return () => {
+      monthAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!state.payload) {
       return;
     }
     const todayKey = formatDayKey(new Date());
-    setSelectedDayKey((current) => current || todayKey);
-  }, [state.payload]);
+    const todayMonthKey = formatMonthKey(new Date());
+    setSelectedDayKey((current) => {
+      if (selectedMonthKey === todayMonthKey) {
+        if (current && current.startsWith(`${selectedMonthKey}-`)) {
+          return current;
+        }
+        return todayKey;
+      }
+      if (current && current.startsWith(`${selectedMonthKey}-`)) {
+        return current;
+      }
+      return null;
+    });
+  }, [state.payload, selectedMonthKey]);
 
   useEffect(() => {
     return subscribeToLiveUpdates((event) => {
       if (!shouldApplyLiveEvent(event, user.ft_login, selectedMonthKey)) {
         return;
       }
-      if (event?.day_summary) {
+      if (event?.month_payload || event?.day_summary) {
         setState((current) => ({
           ...current,
           payload: mergeLiveDetailPayload(current.payload, event)
         }));
-        return;
-      }
-      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
-        void loadSelfDetail({ monthKey: selectedMonthKey, background: true });
       }
     });
   }, [selectedMonthKey, user.ft_login]);
@@ -1330,7 +1372,10 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
       if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
         return current;
       }
-      return formatMonthKey(shiftMonth(parsed, delta));
+      const nextMonthKey = formatMonthKey(shiftMonth(parsed, delta));
+      const todayMonthKey = formatMonthKey(new Date());
+      setSelectedDayKey(nextMonthKey === todayMonthKey ? formatDayKey(new Date()) : null);
+      return nextMonthKey;
     });
   }
 
@@ -1879,22 +1924,33 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
   );
 }
 
-function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary = null, onDayLoaded = null }) {
+function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary = null }) {
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [currentTime, setCurrentTime] = useState(() => new Date());
+  const dayRequestRef = useRef(0);
+  const dayAbortRef = useRef(null);
   const isToday = dayKey === formatDayKey(new Date());
   const dayMeta = getCalendarDayMeta(selectedDaySummary?.day_type, selectedDaySummary?.day_type_label);
   const requiredAttendanceLabel = formatRequiredAttendanceHours(selectedDaySummary?.required_attendance_hours);
 
   async function loadDay(targetDay = dayKey, options = {}) {
     const { background = false } = options;
+    dayAbortRef.current?.abort();
+    const controller = new AbortController();
+    dayAbortRef.current = controller;
+    const requestId = dayRequestRef.current + 1;
+    dayRequestRef.current = requestId;
     if (!background) {
       setState((current) => ({ ...current, loading: true, error: "" }));
     }
     try {
       const { response, json, text } = await requestJSON(
-        `${dayEndpointBase}?date=${encodeURIComponent(targetDay)}`
+        `${dayEndpointBase}?date=${encodeURIComponent(targetDay)}`,
+        { signal: controller.signal }
       );
+      if (requestId !== dayRequestRef.current) {
+        return;
+      }
       if (!response.ok) {
         if (response.status === 404) {
           setState({
@@ -1915,10 +1971,13 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
         throw new Error((json && json.message) || text || "Unable to load this day.");
       }
       setState({ loading: false, error: "", payload: json });
-      if (typeof onDayLoaded === "function") {
-        onDayLoaded(json, targetDay, options);
-      }
     } catch (loadError) {
+      if (loadError instanceof Error && loadError.name === "AbortError") {
+        return;
+      }
+      if (requestId !== dayRequestRef.current) {
+        return;
+      }
       setState((current) => ({
         loading: false,
         error: loadError instanceof Error ? loadError.message : String(loadError),
@@ -1930,6 +1989,12 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
   useEffect(() => {
     void loadDay(dayKey);
   }, [dayEndpointBase, dayKey, login]);
+
+  useEffect(() => {
+    return () => {
+      dayAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1951,10 +2016,6 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
           error: "",
           payload: event.day_payload
         }));
-        return;
-      }
-      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
-        void loadDay(dayKey, { background: true });
       }
     });
   }, [dayEndpointBase, dayKey, login]);
@@ -2030,6 +2091,8 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [selectedDayKey, setSelectedDayKey] = useState(() => formatDayKey(new Date()));
   const [selectedMonthKey, setSelectedMonthKey] = useState(() => formatMonthKey(new Date()));
+  const monthRequestRef = useRef(0);
+  const monthAbortRef = useRef(null);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [blacklistModalOpen, setBlacklistModalOpen] = useState(false);
@@ -2037,18 +2100,34 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
 
   async function loadUserDetail(targetLogin = login, options = {}) {
     const { monthKey = selectedMonthKey || formatMonthKey(new Date()), background = false } = options;
+    monthAbortRef.current?.abort();
+    const controller = new AbortController();
+    monthAbortRef.current = controller;
+    const requestId = monthRequestRef.current + 1;
+    monthRequestRef.current = requestId;
     if (!background) {
       setState((current) => ({ ...current, loading: true, error: "" }));
     }
     try {
       const query = new URLSearchParams();
       query.set("month", monthKey);
-      const { response, json, text } = await requestJSON(`/api/admin/users/${encodeURIComponent(targetLogin)}?${query.toString()}`);
+      const { response, json, text } = await requestJSON(`/api/admin/users/${encodeURIComponent(targetLogin)}?${query.toString()}`, {
+        signal: controller.signal
+      });
+      if (requestId !== monthRequestRef.current) {
+        return;
+      }
       if (!response.ok) {
         throw new Error((json && json.message) || text || "Unable to load this user.");
       }
       setState({ loading: false, error: "", payload: json });
     } catch (loadError) {
+      if (loadError instanceof Error && loadError.name === "AbortError") {
+        return;
+      }
+      if (requestId !== monthRequestRef.current) {
+        return;
+      }
       setState((current) => ({
         loading: false,
         error: loadError instanceof Error ? loadError.message : String(loadError),
@@ -2062,6 +2141,12 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
   }, [login, selectedMonthKey]);
 
   useEffect(() => {
+    return () => {
+      monthAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     setSelectedDayKey(formatDayKey(new Date()));
     setSelectedMonthKey(formatMonthKey(new Date()));
   }, [login]);
@@ -2071,8 +2156,20 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
       return;
     }
     const todayKey = formatDayKey(new Date());
-    setSelectedDayKey((current) => current || todayKey);
-  }, [state.payload]);
+    const todayMonthKey = formatMonthKey(new Date());
+    setSelectedDayKey((current) => {
+      if (selectedMonthKey === todayMonthKey) {
+        if (current && current.startsWith(`${selectedMonthKey}-`)) {
+          return current;
+        }
+        return todayKey;
+      }
+      if (current && current.startsWith(`${selectedMonthKey}-`)) {
+        return current;
+      }
+      return null;
+    });
+  }, [state.payload, selectedMonthKey]);
 
   useEffect(() => {
     setBlacklistReasonInput(String(state.payload?.blacklist_reason || ""));
@@ -2083,15 +2180,11 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
       if (!shouldApplyLiveEvent(event, login, selectedMonthKey)) {
         return;
       }
-      if (event?.day_summary) {
+      if (event?.month_payload || event?.day_summary) {
         setState((current) => ({
           ...current,
           payload: mergeLiveDetailPayload(current.payload, event)
         }));
-        return;
-      }
-      if (event?.type === "badge_received" || event?.type === "location_sessions_updated") {
-        void loadUserDetail(login, { monthKey: selectedMonthKey, background: true });
       }
     });
   }, [login, selectedMonthKey]);
@@ -2102,7 +2195,10 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
       if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
         return current;
       }
-      return formatMonthKey(shiftMonth(parsed, delta));
+      const nextMonthKey = formatMonthKey(shiftMonth(parsed, delta));
+      const todayMonthKey = formatMonthKey(new Date());
+      setSelectedDayKey(nextMonthKey === todayMonthKey ? formatDayKey(new Date()) : null);
+      return nextMonthKey;
     });
   }
 
@@ -2186,12 +2282,6 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           onChangeMonth={handleChangeMonth}
           onSelectDay={setSelectedDayKey}
           dayEndpointBase={`/api/admin/students/${encodeURIComponent(login)}`}
-          onDayLoaded={(dayPayload) => {
-            if (!dayPayload || dayPayload.live) {
-              return;
-            }
-            void loadUserDetail(login, { monthKey: selectedMonthKey, background: true });
-          }}
           adminControls={{
             isBlacklisted,
             status: getEffectiveStatus(state.payload),
@@ -2249,8 +2339,7 @@ function UserPresencePanel({
   onChangeMonth,
   onSelectDay,
   dayEndpointBase,
-  adminControls = null,
-  onDayLoaded = null
+  adminControls = null
 }) {
   const selectedDaySummary = selectedDayKey
     ? (payload?.days || []).find((day) => day.day === selectedDayKey) || null
@@ -2337,7 +2426,6 @@ function UserPresencePanel({
               dayKey={selectedDayKey}
               dayEndpointBase={dayEndpointBase}
               selectedDaySummary={selectedDaySummary}
-              onDayLoaded={onDayLoaded}
             />
           ) : (
             <section className="admin-day-summary-slot admin-day-summary-empty">

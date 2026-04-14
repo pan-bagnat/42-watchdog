@@ -70,13 +70,17 @@ func fetchAttendanceBoundsForRange(login string, dayStart, dayEnd time.Time) (*A
 	query.Set("allow_overflow", "false")
 
 	path := fmt.Sprintf("/users/%s/attendances?%s", url.PathEscape(login), query.Encode())
+	Trace("API", "GET %s: login=%s window=%s", path, login, traceBounds(dayStart, dayEnd))
 	resp, err := apiManager.GetClient(config.FTAttendance).Get(path)
 	if err != nil {
+		Trace("API", "GET %s: login=%s failed: %v", path, login, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	Trace("API", "GET %s: login=%s status=%s", path, login, resp.Status)
 
 	if resp.StatusCode == http.StatusNotFound {
+		Trace("BUILD", "attendance bounds for %s on %s: no Chronos record (404)", login, traceBounds(dayStart, dayEnd))
 		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -93,8 +97,10 @@ func fetchAttendanceBoundsForRange(login string, dayStart, dayEnd time.Time) (*A
 		return nil, err
 	}
 	if len(payload) == 0 {
+		Trace("BUILD", "attendance bounds for %s on %s: empty payload", login, traceBounds(dayStart, dayEnd))
 		return nil, nil
 	}
+	Trace("BUILD", "attendance payload for %s on %s: %d raw records", login, traceBounds(dayStart, dayEnd), len(payload))
 
 	var (
 		beginAt time.Time
@@ -127,17 +133,20 @@ func fetchAttendanceBoundsForRange(login string, dayStart, dayEnd time.Time) (*A
 	}
 
 	if beginAt.IsZero() || endAt.IsZero() || !endAt.After(beginAt) {
+		Trace("BUILD", "attendance bounds for %s on %s: payload could not produce valid bounds", login, traceBounds(dayStart, dayEnd))
 		return nil, nil
 	}
 	if source == "" {
 		source = attendanceAccessControlSource
 	}
 
-	return &AttendanceBounds{
+	bounds := &AttendanceBounds{
 		BeginAt: beginAt,
 		EndAt:   endAt,
 		Source:  source,
-	}, nil
+	}
+	Trace("BUILD", "attendance bounds built for %s: source=%s bounds=%s", login, bounds.Source, traceBounds(bounds.BeginAt, bounds.EndAt))
+	return bounds, nil
 }
 
 func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*AttendanceBounds, error) {
@@ -158,13 +167,17 @@ func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*Attendan
 	query.Set("allow_overflow", "false")
 
 	path := fmt.Sprintf("/users/%s/attendances?%s", url.PathEscape(login), query.Encode())
+	Trace("API", "GET %s: login=%s month=%s window=%s", path, login, monthKey, traceBounds(monthStart, monthEnd))
 	resp, err := apiManager.GetClient(config.FTAttendance).Get(path)
 	if err != nil {
+		Trace("API", "GET %s: login=%s failed: %v", path, login, err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	Trace("API", "GET %s: login=%s status=%s", path, login, resp.Status)
 
 	if resp.StatusCode == http.StatusNotFound {
+		Trace("BUILD", "monthly attendance bounds for %s on %s: no Chronos records (404)", login, monthKey)
 		return map[string]*AttendanceBounds{}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -180,6 +193,7 @@ func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*Attendan
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
+	Trace("BUILD", "monthly attendance payload for %s on %s: %d raw records", login, monthKey, len(payload))
 
 	grouped := make(map[string]*AttendanceBounds)
 	for _, item := range payload {
@@ -227,6 +241,7 @@ func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*Attendan
 			bounds.Source = attendanceAccessControlSource
 		}
 	}
+	Trace("BUILD", "monthly attendance bounds built for %s on %s: %d days", login, monthKey, len(grouped))
 
 	return grouped, nil
 }
@@ -251,7 +266,13 @@ func attendanceBoundsAsBadgeEvents(bounds *AttendanceBounds) []BadgeEvent {
 
 func applyAttendanceBoundsFallback(events []BadgeEvent, bounds *AttendanceBounds) []BadgeEvent {
 	if len(events) > 0 {
+		Trace("BUILD", "badge fallback skipped: %d badge events already available", len(events))
 		return events
+	}
+	if bounds == nil {
+		Trace("BUILD", "badge fallback unavailable: no badge events and no attendance bounds")
+	} else {
+		Trace("BUILD", "badge fallback applied from attendance bounds: %s source=%s", traceBounds(bounds.BeginAt, bounds.EndAt), bounds.Source)
 	}
 	return attendanceBoundsAsBadgeEvents(bounds)
 }
@@ -270,6 +291,7 @@ func fetchSupplementalDayData(login, dayKey string, needLocations bool, needAtte
 		locationErr      error
 		attendanceErr    error
 	)
+	Trace("BUILD", "supplemental day fetch start for %s on %s: needLocations=%t needAttendance=%t", login, dayKey, needLocations, needAttendance)
 
 	results := make(chan struct{}, 2)
 	if needLocations {
@@ -295,6 +317,7 @@ func fetchSupplementalDayData(login, dayKey string, needLocations bool, needAtte
 	for i := 0; i < pending; i++ {
 		<-results
 	}
+	Trace("BUILD", "supplemental day fetch done for %s on %s: locations=%d attendance_bounds=%t locationErr=%v attendanceErr=%v", login, dayKey, len(locationSessions), attendanceBounds != nil, locationErr, attendanceErr)
 
 	return locationSessions, attendanceBounds, locationErr, attendanceErr
 }

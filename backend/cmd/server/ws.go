@@ -12,17 +12,19 @@ import (
 )
 
 type wsMessage struct {
-	Type                        string                `json:"type"`
-	Login                       string                `json:"login"`
-	Day                         string                `json:"day,omitempty"`
-	Timestamp                   time.Time             `json:"timestamp,omitempty"`
-	DoorName                    string                `json:"door_name,omitempty"`
-	BadgeDelaySeconds           int64                 `json:"badge_delay_seconds,omitempty"`
-	DayPayload                  *apiStudentMeResponse `json:"day_payload,omitempty"`
-	DaySummary                  *apiAdminStudentDay   `json:"day_summary,omitempty"`
-	LastBadgeAt                 *time.Time            `json:"last_badge_at,omitempty"`
-	LastBadgeDayDurationSeconds int64                 `json:"last_badge_day_duration_seconds,omitempty"`
-	LastBadgeDayDurationHuman   string                `json:"last_badge_day_duration_human,omitempty"`
+	Type                        string                      `json:"type"`
+	Login                       string                      `json:"login"`
+	Day                         string                      `json:"day,omitempty"`
+	Month                       string                      `json:"month,omitempty"`
+	Timestamp                   time.Time                   `json:"timestamp,omitempty"`
+	DoorName                    string                      `json:"door_name,omitempty"`
+	BadgeDelaySeconds           int64                       `json:"badge_delay_seconds,omitempty"`
+	DayPayload                  *apiStudentMeResponse       `json:"day_payload,omitempty"`
+	DaySummary                  *apiAdminStudentDay         `json:"day_summary,omitempty"`
+	MonthPayload                *apiAdminUserDetailResponse `json:"month_payload,omitempty"`
+	LastBadgeAt                 *time.Time                  `json:"last_badge_at,omitempty"`
+	LastBadgeDayDurationSeconds int64                       `json:"last_badge_day_duration_seconds,omitempty"`
+	LastBadgeDayDurationHuman   string                      `json:"last_badge_day_duration_human,omitempty"`
 }
 
 type wsHub struct {
@@ -100,6 +102,15 @@ func initLiveUpdates() {
 		enrichLiveUpdateMessage(&message, event.Login, event.DayKey)
 		liveUpdatesHub.broadcast(message)
 	})
+	watchdog.RegisterLocationMonthUpdateListener(func(event watchdog.LocationMonthUpdateEvent) {
+		message := wsMessage{
+			Type:  "month_updated",
+			Login: event.Login,
+			Month: event.MonthKey,
+		}
+		enrichLiveUpdateMonthMessage(&message, event.Login, event.MonthKey)
+		liveUpdatesHub.broadcast(message)
+	})
 }
 
 func enrichLiveUpdateMessage(message *wsMessage, login, dayKey string) {
@@ -128,7 +139,46 @@ func enrichLiveUpdateMessage(message *wsMessage, login, dayKey string) {
 	}
 }
 
+func enrichLiveUpdateMonthMessage(message *wsMessage, login, monthKey string) {
+	if message == nil {
+		return
+	}
+
+	trimmedLogin := strings.ToLower(strings.TrimSpace(login))
+	trimmedMonthKey := strings.TrimSpace(monthKey)
+	if trimmedLogin == "" || trimmedMonthKey == "" {
+		return
+	}
+
+	message.Login = trimmedLogin
+	message.Month = trimmedMonthKey
+
+	if payload, ok := buildLiveUpdateMonthPayload(trimmedLogin, trimmedMonthKey); ok {
+		message.MonthPayload = &payload
+		message.LastBadgeAt = payload.LastBadgeAt
+		message.LastBadgeDayDurationSeconds = payload.LastBadgeDayDurationSeconds
+		message.LastBadgeDayDurationHuman = payload.LastBadgeDayDurationHuman
+	}
+}
+
 func buildLiveUpdateDaySummary(login, dayKey string) (apiAdminStudentDay, bool) {
+	var (
+		dayType                 string
+		dayTypeLabel            string
+		requiredAttendanceHours *float64
+	)
+	if monthDays, err := watchdog.AttendanceDaysForLogin(login, dayKey[:7]); err == nil {
+		for _, day := range monthDays {
+			if day.DayKey != dayKey {
+				continue
+			}
+			dayType = day.DayType
+			dayTypeLabel = day.DayTypeLabel
+			requiredAttendanceHours = day.RequiredAttendanceHours
+			break
+		}
+	}
+
 	if dayKey == todayDayKey() {
 		badgeEvents, badgeLoading := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(login)
 		locationSessions, locationsLoading := watchdog.SnapshotDailyLocationSessionsOrSchedule(login)
@@ -154,13 +204,16 @@ func buildLiveUpdateDaySummary(login, dayKey string) (apiAdminStudentDay, bool) 
 		}
 		duration := watchdog.CombinedRetainedDuration(badgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
 		return apiAdminStudentDay{
-			Day:             dayKey,
-			Live:            true,
-			FirstAccess:     timePtr(user.FirstAccess),
-			LastAccess:      timePtr(user.LastAccess),
-			DurationSeconds: int64(duration / time.Second),
-			DurationHuman:   duration.String(),
-			Status:          user.Status,
+			Day:                     dayKey,
+			Live:                    true,
+			FirstAccess:             timePtr(user.FirstAccess),
+			LastAccess:              timePtr(user.LastAccess),
+			DurationSeconds:         int64(duration / time.Second),
+			DurationHuman:           duration.String(),
+			Status:                  user.Status,
+			DayType:                 dayType,
+			DayTypeLabel:            dayTypeLabel,
+			RequiredAttendanceHours: requiredAttendanceHours,
 		}, true
 	}
 
@@ -169,13 +222,16 @@ func buildLiveUpdateDaySummary(login, dayKey string) (apiAdminStudentDay, bool) 
 		return apiAdminStudentDay{}, false
 	}
 	return apiAdminStudentDay{
-		Day:             dayKey,
-		Live:            false,
-		FirstAccess:     timePtr(record.User.FirstAccess),
-		LastAccess:      timePtr(record.User.LastAccess),
-		DurationSeconds: int64(record.RetainedDuration / time.Second),
-		DurationHuman:   record.RetainedDuration.String(),
-		Status:          record.User.Status,
+		Day:                     dayKey,
+		Live:                    false,
+		FirstAccess:             timePtr(record.User.FirstAccess),
+		LastAccess:              timePtr(record.User.LastAccess),
+		DurationSeconds:         int64(record.RetainedDuration / time.Second),
+		DurationHuman:           record.RetainedDuration.String(),
+		Status:                  record.User.Status,
+		DayType:                 dayType,
+		DayTypeLabel:            dayTypeLabel,
+		RequiredAttendanceHours: requiredAttendanceHours,
 	}, true
 }
 
@@ -235,6 +291,63 @@ func buildLiveUpdateDayPayload(login, dayKey string) (apiStudentMeResponse, bool
 		return apiStudentMeResponse{}, false
 	}
 	return mapHistoricalStudentResponse(record), true
+}
+
+func buildLiveUpdateMonthPayload(login, monthKey string) (apiAdminUserDetailResponse, bool) {
+	days, err := watchdog.AttendanceDaysForLogin(login, monthKey)
+	if err != nil {
+		return apiAdminUserDetailResponse{}, false
+	}
+
+	payload := apiAdminUserDetailResponse{
+		apiAdminUserListItem: apiAdminUserListItem{
+			Login42:          login,
+			PhotoURL:         watchdog.CachedUserPhotoURLOrSchedule(login),
+			Status:           "student",
+			Status42:         "student",
+			StatusOverridden: false,
+			IsBlacklisted:    false,
+			BadgePostingOff:  false,
+		},
+		Days: make([]apiAdminStudentDay, 0, len(days)),
+	}
+
+	if user, ok, err := watchdog.AdminUserByLogin(login); err == nil && ok {
+		payload.apiAdminUserListItem = mapAdminUser(user)
+	} else if err == nil {
+		if settings, settingsOK, settingsErr := watchdog.UserSettingsByLogin(login); settingsErr == nil && settingsOK {
+			if settings.Status != "" {
+				payload.Status = settings.Status
+			}
+			if settings.Status42 != "" {
+				payload.Status42 = settings.Status42
+			}
+			payload.StatusOverridden = settings.StatusOverridden
+			payload.IsBlacklisted = settings.IsBlacklisted
+			payload.BadgePostingOff = settings.BadgePostingOff
+			payload.BlacklistReason = settings.BlacklistReason
+		}
+	} else {
+		return apiAdminUserDetailResponse{}, false
+	}
+
+	for _, day := range days {
+		payload.Days = append(payload.Days, apiAdminStudentDay{
+			Day:                     day.DayKey,
+			Live:                    day.Live,
+			FirstAccess:             timePtr(day.FirstAccess),
+			LastAccess:              timePtr(day.LastAccess),
+			DurationSeconds:         int64(day.Duration / time.Second),
+			DurationHuman:           day.Duration.String(),
+			Status:                  day.Status,
+			Loading:                 day.Loading,
+			DayType:                 day.DayType,
+			DayTypeLabel:            day.DayTypeLabel,
+			RequiredAttendanceHours: day.RequiredAttendanceHours,
+		})
+	}
+
+	return payload, true
 }
 
 func liveUpdatesHandler(w http.ResponseWriter, r *http.Request) {

@@ -28,6 +28,25 @@ func Log(msg string) {
 	}
 }
 
+func Trace(scope string, format string, args ...any) {
+	scope = strings.ToUpper(strings.TrimSpace(scope))
+	if scope == "" {
+		scope = "TRACE"
+	}
+	Log(fmt.Sprintf("[WATCHDOG] [%s] %s", scope, fmt.Sprintf(format, args...)))
+}
+
+func traceTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "<zero>"
+	}
+	return ts.In(parisLocation()).Format(time.RFC3339Nano)
+}
+
+func traceBounds(beginAt, endAt time.Time) string {
+	return fmt.Sprintf("%s -> %s", traceTime(beginAt), traceTime(endAt))
+}
+
 func CloseLogs() {
 	logFile.Close()
 }
