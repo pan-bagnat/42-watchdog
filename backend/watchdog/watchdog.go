@@ -598,7 +598,7 @@ func reportMessageForUser(user User) string {
 	return "Post not attempted"
 }
 
-func buildDailyReportUsers(processedUsers []User, dayKey string) ([]User, []User, error) {
+func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing bool) ([]User, []User, error) {
 	baseUsers, err := loadBaseApprenticeUsers()
 	if err != nil {
 		return nil, nil, err
@@ -677,7 +677,7 @@ func buildDailyReportUsers(processedUsers []User, dayKey string) ([]User, []User
 	if err != nil {
 		return nil, nil, err
 	}
-	if dayKey == currentRuntimeDayKey() {
+	if refetchMissing && dayKey == currentRuntimeDayKey() {
 		refetchMissingApprenticesForReport(usersByLogin, settingsByLogin)
 	}
 
@@ -800,7 +800,7 @@ func ReportUsersForDay(dayKey string, users []User, postsByLogin map[string][]At
 		preparedUsers = append(preparedUsers, user)
 	}
 
-	seenToday, expectedToday, err := buildDailyReportUsers(preparedUsers, dayKey)
+	seenToday, expectedToday, err := buildDailyReportUsers(preparedUsers, dayKey, false)
 	if err != nil {
 		return nil, err
 	}
@@ -950,7 +950,7 @@ func postApprenticesAttendancesLocked() {
 		<table style="border:2px solid #ccc; padding: 8px; border-collapse:collapse; background:#f9f9f9;">
 	`)
 	htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
-	seenToday, expectedToday, reportErr := buildDailyReportUsers(processedUsers, currentRuntimeDayKey())
+	seenToday, expectedToday, reportErr := buildDailyReportUsers(processedUsers, currentRuntimeDayKey(), true)
 	if reportErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not build apprentices report: %v", reportErr))
 	}

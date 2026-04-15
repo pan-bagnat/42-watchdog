@@ -554,6 +554,10 @@ button {
   color: #86d59c;
 }
 
+.report-line-warning {
+  color: #f2c572;
+}
+
 .report-line-danger {
   color: #ff8b7d;
 }

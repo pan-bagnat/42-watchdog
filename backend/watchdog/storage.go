@@ -1840,6 +1840,7 @@ func buildDailyReportSummary(dayKey string, users []User) (DailyReportSummary, e
 	if err != nil {
 		return report, err
 	}
+	isLiveDay := dayKey == currentRuntimeDayKey()
 
 	for _, user := range users {
 		if !user.IsApprentice {
@@ -1851,6 +1852,9 @@ func buildDailyReportSummary(dayKey string, users []User) (DailyReportSummary, e
 		report.StudentCount++
 		if user.PostResult == POSTED || user.PostResult == POST_OFF {
 			report.PostedCount++
+			continue
+		}
+		if isLiveDay {
 			continue
 		}
 		report.FailedCount++

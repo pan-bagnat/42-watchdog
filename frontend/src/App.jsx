@@ -232,7 +232,10 @@ function formatLastBadgeAt(value) {
   }).format(date);
 }
 
-function getReportLineMessage(user) {
+function getReportLineMessage(user, isLiveDay = false) {
+  if (isLiveDay && !isReportLineSuccess(user)) {
+    return "Day is still on going";
+  }
   const status = String(user?.post_result || "").trim();
   const errorMessage = String(user?.error_message || "").trim();
 
@@ -275,11 +278,18 @@ function padCenter(value, width) {
   return `${" ".repeat(left)}${text}${" ".repeat(right)}`;
 }
 
-function buildReportLine(user) {
+function getReportLineTone(user, isLiveDay = false) {
+  if (isReportLineSuccess(user)) {
+    return "success";
+  }
+  return isLiveDay ? "warning" : "danger";
+}
+
+function buildReportLine(user, isLiveDay = false) {
   const success = isReportLineSuccess(user);
-  const message = getReportLineMessage(user);
+  const message = getReportLineMessage(user, isLiveDay);
   const { first, last } = getReportLineTimes(user);
-  const emoji = success ? "✅" : "❌";
+  const emoji = success ? "✅" : isLiveDay ? "⏳" : "❌";
   const login = String(user?.login_42 || "").padEnd(8, " ");
   const duration = padCenter(`(${formatCompactDuration(user?.duration_seconds, user?.duration_human)})`, 10);
   return `${emoji} ${login}: ${first}-${last}  ${duration}  — ${message}`;
@@ -1764,7 +1774,11 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                     <div className="report-day-stats">
                       <span>{report.student_count} alternants</span>
                       <span>{report.posted_count} posts</span>
-                      {report.failed_count > 0 ? <span className="report-stat-danger">{report.failed_count} échecs</span> : null}
+                      {report.live ? (
+                        <span className="report-stat-warning">Journée en cours</span>
+                      ) : report.failed_count > 0 ? (
+                        <span className="report-stat-danger">{report.failed_count} échecs</span>
+                      ) : null}
                     </div>
                     <span className={`report-day-chevron${isExpanded ? " report-day-chevron-open" : ""}`} aria-hidden>
                       ▾
@@ -1792,13 +1806,13 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                                     return <div key={`${report.day}-separator-${index}`} className="report-line-gap" aria-hidden />;
                                   }
 
-                                  const success = isReportLineSuccess(student);
-                                  const line = buildReportLine(student);
+                                  const tone = getReportLineTone(student, report.live);
+                                  const line = buildReportLine(student, report.live);
 
                                   return (
                                     <div
                                       key={`${report.day}-${student.login_42}`}
-                                      className={`report-line${success ? " report-line-success" : " report-line-danger"}`}
+                                      className={`report-line report-line-${tone}`}
                                     >
                                       {line}
                                     </div>
