@@ -811,6 +811,35 @@ func ReportUsersForDay(dayKey string, users []User, postsByLogin map[string][]At
 	return reportUsers, nil
 }
 
+func ReportDetailForDay(dayKey string) ([]User, bool, map[string][]AttendancePostRecord, error) {
+	ensureRuntimeDayState()
+
+	targetDayKey := strings.TrimSpace(dayKey)
+	if targetDayKey == "" {
+		targetDayKey = currentRuntimeDayKey()
+	}
+
+	postsByLogin, err := loadAttendancePostsForDay(targetDayKey)
+	if err != nil {
+		return nil, false, nil, err
+	}
+
+	if targetDayKey == currentRuntimeDayKey() {
+		users, err := loadCurrentUsersForDay(targetDayKey, true)
+		if err != nil {
+			return nil, true, nil, err
+		}
+		reportUsers, err := ReportUsersForDay(targetDayKey, users, postsByLogin)
+		return reportUsers, true, postsByLogin, err
+	}
+
+	users, err := loadHistoricalUsersForDay(targetDayKey, true)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	return users, false, postsByLogin, nil
+}
+
 func resetUserDuration(user User) {
 	user.FirstAccess = time.Time{}
 	user.LastAccess = time.Time{}

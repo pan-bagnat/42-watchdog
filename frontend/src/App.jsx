@@ -1681,7 +1681,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
 
     try {
       const { response, json, text } = await requestJSON(
-        `/api/admin/students?date=${encodeURIComponent(dayKey)}&apprentices_only=true`
+        `/api/admin/reports/${encodeURIComponent(dayKey)}`
       );
       if (!response.ok) {
         throw new Error((json && json.message) || text || "Unable to load this report day.");

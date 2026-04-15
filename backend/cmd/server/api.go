@@ -421,6 +421,42 @@ func adminReportsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
+func adminReportDetailHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dayKey := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/reports/"))
+	if dayKey == "" || strings.Contains(dayKey, "/") {
+		http.NotFound(w, r)
+		return
+	}
+
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		loc = time.Local
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", dayKey, loc)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_date", "date must use YYYY-MM-DD format.")
+		return
+	}
+	dayKey = parsed.Format("2006-01-02")
+
+	users, _, postsByLogin, err := watchdog.ReportDetailForDay(dayKey)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "report_load_failed", "Could not load report detail.")
+		return
+	}
+	if len(users) == 0 {
+		writeJSONError(w, http.StatusNotFound, "report_not_found", "Report not found.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, mapUsersWithPreservedReportState(users, postsByLogin))
+}
+
 func adminStudentDaysHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
