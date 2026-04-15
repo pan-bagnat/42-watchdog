@@ -265,7 +265,8 @@ func (p *panbagnatProvider) FetchUser(r *http.Request, requireAdmin bool) (*auth
 	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
 		return nil, nil, err
 	}
-	if requireAdmin && !isPanbagnatAdmin(user) {
+	applyPanbagnatAdminPolicy(&user)
+	if requireAdmin && !user.IsAdmin {
 		return nil, newAuthErrorResponse(http.StatusForbidden, "admin_required", "You are not allowed to use this endpoint."), nil
 	}
 
@@ -408,12 +409,24 @@ func isPanbagnatAdmin(user authUser) bool {
 	return false
 }
 
+func applyPanbagnatAdminPolicy(user *authUser) {
+	if user == nil {
+		return
+	}
+
+	// In Pan Bagnat mode, Watchdog admin rights must come only from AUTH_ADMIN_ROLES.
+	// Normalize the admin-facing flag so leftover IsStaff values from upstream cannot
+	// grant admin access anywhere else in the app.
+	user.IsAdmin = isPanbagnatAdmin(*user)
+	user.IsStaff = user.IsAdmin
+}
+
 func isUserAllowedLoginOverride(user *authUser) bool {
 	if user == nil {
 		return false
 	}
 	if isPanbagnatAuthMode() {
-		return isPanbagnatAdmin(*user)
+		return user.IsAdmin
 	}
 	return user.IsStaff || user.FtIsStaff
 }
@@ -485,7 +498,11 @@ func authMeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responseUser := *user
-	responseUser.IsAdmin = isUserAllowedLoginOverride(user)
+	if isPanbagnatAuthMode() {
+		applyPanbagnatAdminPolicy(&responseUser)
+	} else {
+		responseUser.IsAdmin = isUserAllowedLoginOverride(user)
+	}
 
 	writeJSON(w, http.StatusOK, authMeResponse{
 		authUser:          &responseUser,
