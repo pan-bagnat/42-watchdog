@@ -567,6 +567,185 @@ func formatPostInfo(user User, loc *time.Location, msg string) string {
 	)
 }
 
+func reportDurationForUser(user User) time.Duration {
+	if user.FirstAccess.IsZero() || user.LastAccess.IsZero() || user.LastAccess.Before(user.FirstAccess) {
+		return 0
+	}
+	return user.LastAccess.Sub(user.FirstAccess)
+}
+
+func reportMessageForUser(user User) string {
+	switch user.PostResult {
+	case POST_SKIPPED_BLACKLIST:
+		return "Apprentice is blacklisted"
+	case POST_SKIPPED_DISABLED:
+		return "Badge posting is disabled"
+	case POST_SKIPPED_NOT_SCHOOL_DAY:
+		return "Apprentice is not on a school day"
+	case APPRENTICE_BADGED_ONCE:
+		return "Used badge only once"
+	case APPRENTICE_NO_BADGE:
+		return "No badge used today"
+	case APPRENTICE_EXPECTED_ABSENT:
+		return APPRENTICE_EXPECTED_ABSENT
+	}
+	if user.Error != nil {
+		return user.Error.Error()
+	}
+	if strings.TrimSpace(user.PostResult) != "" {
+		return user.PostResult
+	}
+	return "Post not attempted"
+}
+
+func buildDailyReportUsers(processedUsers []User, dayKey string) ([]User, []User, error) {
+	baseUsers, err := loadBaseApprenticeUsers()
+	if err != nil {
+		return nil, nil, err
+	}
+	profiles, err := loadDayProfiles(dayKey)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	usersByLogin := make(map[string]User, len(baseUsers)+len(profiles)+len(processedUsers))
+	for login, user := range baseUsers {
+		usersByLogin[normalizeLogin(login)] = user
+	}
+	for login, user := range profiles {
+		login = normalizeLogin(login)
+		existing := usersByLogin[login]
+		if existing.Login42 == "" {
+			existing = user
+		}
+		existing.Login42 = login
+		if existing.ControlAccessID == 0 {
+			existing.ControlAccessID = user.ControlAccessID
+			existing.ControlAccessName = user.ControlAccessName
+			existing.ID42 = user.ID42
+		}
+		if !existing.IsApprentice {
+			existing.IsApprentice = user.IsApprentice
+			existing.Profile = user.Profile
+		}
+		usersByLogin[login] = existing
+	}
+	for _, user := range processedUsers {
+		login := normalizeLogin(user.Login42)
+		existing := usersByLogin[login]
+		if existing.Login42 == "" {
+			existing = user
+		}
+		if strings.TrimSpace(existing.Login42) == "" {
+			existing.Login42 = login
+		}
+		if user.ControlAccessID != 0 {
+			existing.ControlAccessID = user.ControlAccessID
+			existing.ControlAccessName = user.ControlAccessName
+			existing.ID42 = user.ID42
+		}
+		if user.IsApprentice || existing.Login42 == "" {
+			existing.IsApprentice = user.IsApprentice
+			existing.Profile = user.Profile
+		}
+		if !user.FirstAccess.IsZero() {
+			existing.FirstAccess = user.FirstAccess
+		}
+		if !user.LastAccess.IsZero() {
+			existing.LastAccess = user.LastAccess
+		}
+		if user.Duration > 0 {
+			existing.Duration = user.Duration
+		}
+		if strings.TrimSpace(user.PostResult) != "" {
+			existing.PostResult = user.PostResult
+		}
+		if user.Error != nil {
+			existing.Error = user.Error
+		}
+		usersByLogin[login] = existing
+	}
+
+	logins := make([]string, 0, len(usersByLogin))
+	for login, user := range usersByLogin {
+		if !user.IsApprentice {
+			continue
+		}
+		logins = append(logins, login)
+	}
+	settingsByLogin, err := loadUserSettingsMap(logins)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	seenToday := make([]User, 0, len(logins))
+	expectedToday := make([]User, 0, len(logins))
+	for _, login := range logins {
+		user := usersByLogin[login]
+		if settings, ok := settingsByLogin[login]; ok {
+			applyUserSettings(&user, settings)
+		} else {
+			user.Status42 = statusFromSignals(user.IsApprentice, user.Profile)
+			user.Status = user.Status42
+		}
+
+		calendarDay, calendarErr := loadStudentCalendarDay(user.Login42, dayKey)
+		if calendarErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while building report: %v", user.Login42, dayKey, calendarErr))
+		}
+		isSchoolDay := isSchoolDayType(calendarDay.DayType)
+
+		if !user.FirstAccess.IsZero() {
+			user.Duration = reportDurationForUser(user)
+			if !isSchoolDay {
+				user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
+				user.Error = fmt.Errorf("Apprentice is not on a school day")
+			}
+			seenToday = append(seenToday, user)
+			continue
+		}
+
+		if !isSchoolDay {
+			continue
+		}
+
+		user.Duration = 0
+		user.PostResult = APPRENTICE_EXPECTED_ABSENT
+		user.Error = fmt.Errorf(APPRENTICE_EXPECTED_ABSENT)
+		expectedToday = append(expectedToday, user)
+	}
+
+	sort.Slice(seenToday, func(i, j int) bool {
+		return seenToday[i].Login42 < seenToday[j].Login42
+	})
+	sort.Slice(expectedToday, func(i, j int) bool {
+		return expectedToday[i].Login42 < expectedToday[j].Login42
+	})
+
+	return seenToday, expectedToday, nil
+}
+
+func ReportUsersForDay(dayKey string, users []User, postsByLogin map[string][]AttendancePostRecord) ([]User, error) {
+	preparedUsers := make([]User, 0, len(users))
+	for _, user := range users {
+		login := normalizeLogin(user.Login42)
+		if dayKey == currentRuntimeDayKey() || (strings.TrimSpace(user.PostResult) == "" && user.Error == nil) {
+			PopulateUserPostResult(&user, postsByLogin[login])
+		}
+		preparedUsers = append(preparedUsers, user)
+	}
+
+	seenToday, expectedToday, err := buildDailyReportUsers(preparedUsers, dayKey)
+	if err != nil {
+		return nil, err
+	}
+
+	reportUsers := make([]User, 0, len(seenToday)+len(expectedToday))
+	reportUsers = append(reportUsers, seenToday...)
+	reportUsers = append(reportUsers, expectedToday...)
+	return reportUsers, nil
+}
+
 func resetUserDuration(user User) {
 	user.FirstAccess = time.Time{}
 	user.LastAccess = time.Time{}
@@ -706,65 +885,26 @@ func postApprenticesAttendancesLocked() {
 		<table style="border:2px solid #ccc; padding: 8px; border-collapse:collapse; background:#f9f9f9;">
 	`)
 	htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
-	if len(sortedUser[POSTED]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Posts")
-		for _, user := range sortedUser[POSTED] {
-			Log(formatPostInfo(user, parisLoc, user.PostResult))
+	seenToday, expectedToday, reportErr := buildDailyReportUsers(processedUsers, currentRuntimeDayKey())
+	if reportErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not build apprentices report: %v", reportErr))
+	}
+
+	if len(seenToday) > 0 {
+		Log("[WATCHDOG] [POST] ├──────── Apprentices: Seen today")
+		for _, user := range seenToday {
+			msg := reportMessageForUser(user)
+			Log(formatPostInfo(user, parisLoc, msg))
 			addLogToMail(&htmlBody, user, parisLoc)
 		}
 		htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
 		atLeastOneField = true
 	}
 
-	if len(sortedUser[POST_OFF]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Posts (off)")
-		for _, user := range sortedUser[POST_OFF] {
-			Log(formatPostInfo(user, parisLoc, user.PostResult))
-			addLogToMail(&htmlBody, user, parisLoc)
-		}
-		htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
-	}
-
-	if len(sortedUser[POST_SKIPPED_BLACKLIST]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Blacklisted")
-		for _, user := range sortedUser[POST_SKIPPED_BLACKLIST] {
-			Log(formatPostInfo(user, parisLoc, "Apprentice is blacklisted"))
-			addLogToMail(&htmlBody, user, parisLoc)
-		}
-		atLeastOneField = true
-	}
-
-	if len(sortedUser[POST_SKIPPED_NOT_SCHOOL_DAY]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Not on a school day")
-		for _, user := range sortedUser[POST_SKIPPED_NOT_SCHOOL_DAY] {
-			Log(formatPostInfo(user, parisLoc, "Apprentice is not on a school day"))
-			addLogToMail(&htmlBody, user, parisLoc)
-		}
-		atLeastOneField = true
-	}
-
-	if len(sortedUser[POST_ERROR]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Posts errors")
-		for _, user := range sortedUser[POST_ERROR] {
-			Log(formatPostInfo(user, parisLoc, user.Error.Error()))
-			addLogToMail(&htmlBody, user, parisLoc)
-		}
-		atLeastOneField = true
-	}
-
-	if len(sortedUser[APPRENTICE_BADGED_ONCE]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: Used badge only once")
-		for _, user := range sortedUser[APPRENTICE_BADGED_ONCE] {
-			Log(formatPostInfo(user, parisLoc, "Used badge only once"))
-			addLogToMail(&htmlBody, user, parisLoc)
-		}
-		atLeastOneField = true
-	}
-
-	if len(sortedUser[APPRENTICE_NO_BADGE]) > 0 {
-		Log("[WATCHDOG] [POST] ├──────── Apprentices: No badge used today")
-		for _, user := range sortedUser[APPRENTICE_NO_BADGE] {
-			Log(formatPostInfo(user, parisLoc, "No badge used today"))
+	if len(expectedToday) > 0 {
+		Log("[WATCHDOG] [POST] ├──────── Apprentices: Expected on a school day but not seen")
+		for _, user := range expectedToday {
+			Log(formatPostInfo(user, parisLoc, APPRENTICE_EXPECTED_ABSENT))
 			addLogToMail(&htmlBody, user, parisLoc)
 		}
 		atLeastOneField = true
@@ -790,13 +930,7 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 	durationColor := "green"
 	emoji := "✅"
 
-	msg := user.PostResult
-	if user.Error != nil {
-		msg = user.Error.Error()
-	}
-	if user.PostResult == POST_SKIPPED_BLACKLIST {
-		msg = "Apprentice is blacklisted"
-	}
+	msg := reportMessageForUser(user)
 
 	first := user.FirstAccess.In(loc)
 	if first.Before(time.Date(first.Year(), first.Month(), first.Day(), 8, 0, 0, 0, loc)) {

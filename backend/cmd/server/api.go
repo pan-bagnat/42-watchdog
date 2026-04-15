@@ -245,7 +245,12 @@ func adminStudentsHandler(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "students_load_failed", "Could not load attendance posts.")
 			return
 		}
-		writeJSON(w, http.StatusOK, mapUsersWithAttendancePosts(users, postsByLogin))
+		reportUsers, err := watchdog.ReportUsersForDay(dayKey, users, postsByLogin)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "students_load_failed", "Could not build daily report.")
+			return
+		}
+		writeJSON(w, http.StatusOK, mapUsersWithPreservedReportState(reportUsers, postsByLogin))
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -744,6 +749,16 @@ func mapUsersWithAttendancePosts(users []watchdog.User, postsByLogin map[string]
 		watchdog.PopulateUserPostResult(&user, posts)
 		item := mapUser(user)
 		item.AttendancePosts = mapAttendancePosts(posts)
+		out = append(out, *item)
+	}
+	return out
+}
+
+func mapUsersWithPreservedReportState(users []watchdog.User, postsByLogin map[string][]watchdog.AttendancePostRecord) []apiUserState {
+	out := make([]apiUserState, 0, len(users))
+	for _, user := range users {
+		item := mapUser(user)
+		item.AttendancePosts = mapAttendancePosts(postsByLogin[strings.ToLower(strings.TrimSpace(user.Login42))])
 		out = append(out, *item)
 	}
 	return out

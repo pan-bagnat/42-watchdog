@@ -31,6 +31,13 @@ const CALENDAR_DAY_TYPES = [
   { value: "weekend", label: "Week-end" }
 ];
 
+function isAdminUser(user) {
+  if (!user) {
+    return false;
+  }
+  return user.is_admin ?? (user.is_staff || user.ft_is_staff);
+}
+
 function formatDuration(seconds, fallback) {
   if (typeof seconds !== "number" || Number.isNaN(seconds)) {
     return fallback || "0s";
@@ -1153,7 +1160,7 @@ function StudentDayTimeline({ badgeEvents, locationSessions, currentTime, showNo
 }
 
 function Header({ user, badgeDelaySeconds, onLogout, subtitle, viewMode, onToggleView }) {
-  const isAdmin = user.is_staff || user.ft_is_staff;
+  const isAdmin = isAdminUser(user);
   const roleLabel = isAdmin
     ? viewMode === "student"
       ? "Admin connecte · Vue étudiant"
@@ -2524,13 +2531,12 @@ function App() {
       return;
     }
     if (authState.user && path === "/login") {
-      const isStaffUser = authState.user.is_staff || authState.user.ft_is_staff;
-      const nextPath = isStaffUser ? "/" : "/me";
+      const nextPath = isAdminUser(authState.user) ? "/" : "/me";
       window.history.replaceState({}, "", nextPath);
       setPath(nextPath);
       return;
     }
-    if (authState.user && !(authState.user.is_staff || authState.user.ft_is_staff) && path !== "/me") {
+    if (authState.user && !isAdminUser(authState.user) && path !== "/me") {
       window.history.replaceState({}, "", "/me");
       setPath("/me");
     }
@@ -2582,7 +2588,7 @@ function App() {
     return null;
   }
 
-  const isAdmin = authState.user.is_staff || authState.user.ft_is_staff;
+  const isAdmin = isAdminUser(authState.user);
 
   if (isAdmin && adminViewMode === "admin") {
     if (adminUserLogin !== "") {

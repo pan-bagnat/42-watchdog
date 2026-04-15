@@ -2796,6 +2796,71 @@ func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, er
 	return user, true, nil
 }
 
+func loadBaseApprenticeUsers() (map[string]User, error) {
+	if storageDB == nil {
+		return map[string]User{}, nil
+	}
+
+	rows, err := storageQuery(`
+		SELECT login_42, is_apprentice, profile, status, status_42, status_overridden,
+			is_blacklisted, badge_posting_off, blacklist_reason
+		FROM watchdog_users
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make(map[string]User)
+	for rows.Next() {
+		var user User
+		var isApprentice int
+		var profile int
+		var statusOverridden int
+		var isBlacklisted int
+		var badgePostingOff int
+
+		if err := rows.Scan(
+			&user.Login42,
+			&isApprentice,
+			&profile,
+			&user.Status,
+			&user.Status42,
+			&statusOverridden,
+			&isBlacklisted,
+			&badgePostingOff,
+			&user.BlacklistReason,
+		); err != nil {
+			return nil, err
+		}
+
+		user.Login42 = normalizeLogin(user.Login42)
+		user.IsApprentice = isApprentice == 1
+		user.Profile = ProfileType(profile)
+		user.Status = coalesceManagedStatus(user.Status, statusFromSignals(user.IsApprentice, user.Profile))
+		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
+		user.StatusOverridden = statusOverridden == 1
+		user.IsBlacklisted = isBlacklisted == 1
+		user.BadgePostingOff = badgePostingOff == 1
+		user.BlacklistReason = strings.TrimSpace(user.BlacklistReason)
+
+		effectiveStatus := user.Status42
+		if user.StatusOverridden {
+			effectiveStatus = coalesceManagedStatus(user.Status, user.Status42)
+		}
+		if normalizeManagedUserStatus(effectiveStatus) != "apprentice" {
+			continue
+		}
+
+		user.IsApprentice, user.Profile = signalsFromStatus(effectiveStatus)
+		user.Status = effectiveStatus
+		user.Status42 = coalesceManagedStatus(user.Status42, effectiveStatus)
+		users[user.Login42] = user
+	}
+
+	return users, rows.Err()
+}
+
 func loadActiveLoginsForDay(dayKey string) (map[string]struct{}, error) {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return nil, nil

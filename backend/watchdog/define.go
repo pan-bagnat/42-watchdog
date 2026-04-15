@@ -14,6 +14,7 @@ const (
 
 	APPRENTICE_NO_BADGE         string = "Apprentice didn't badged today"
 	APPRENTICE_BADGED_ONCE      string = "Apprentice badged only once"
+	APPRENTICE_EXPECTED_ABSENT  string = "Apprentice not seen in a school day"
 	POSTED                      string = "Posted"
 	POST_ERROR                  string = "Post returned an error"
 	POST_OFF                    string = "AUTOPOST is off"

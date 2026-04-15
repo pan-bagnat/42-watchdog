@@ -33,6 +33,7 @@ type authUser struct {
 	FtLogin       string     `json:"ft_login"`
 	FtIsStaff     bool       `json:"ft_is_staff"`
 	IsStaff       bool       `json:"is_staff"`
+	IsAdmin       bool       `json:"is_admin"`
 	IsBlacklisted bool       `json:"is_blacklisted"`
 	PhotoURL      string     `json:"ft_photo,omitempty"`
 	Roles         []authRole `json:"roles,omitempty"`
@@ -483,8 +484,11 @@ func authMeHandler(w http.ResponseWriter, r *http.Request) {
 		badgeDelaySeconds = &value
 	}
 
+	responseUser := *user
+	responseUser.IsAdmin = isUserAllowedLoginOverride(user)
+
 	writeJSON(w, http.StatusOK, authMeResponse{
-		authUser:          user,
+		authUser:          &responseUser,
 		BadgeDelaySeconds: badgeDelaySeconds,
 	})
 }
