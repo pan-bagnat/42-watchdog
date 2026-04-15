@@ -110,7 +110,7 @@ func Send(to []string, subject string, body string, html bool) error {
 	for _, r := range to {
 		if err = m.Client.Rcpt(r); err != nil {
 			m.Client.Reset()
-			return nil
+			return fmt.Errorf("smtp recipient %q rejected: %w", r, err)
 		}
 	}
 

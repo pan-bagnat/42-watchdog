@@ -2401,6 +2401,38 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 		Trace("BUILD", "student attendance CFA merge for %s on %s: %d calendar days", login, trimmedMonthKey, len(calendarByDay))
 	}
 
+	for dayKey, summary := range dayMap {
+		if dayKey == "" || dayKey > todayDayKeyInParis() {
+			continue
+		}
+
+		badgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+		if err != nil {
+			return nil, err
+		}
+		locationSessions, err := loadHistoricalLocationSessions(dayKey, login)
+		if err != nil {
+			return nil, err
+		}
+		attendanceBounds, err := loadHistoricalAttendanceBounds(dayKey, login)
+		if err != nil {
+			return nil, err
+		}
+
+		effectiveBadgeEvents := applyAttendanceBoundsFallback(badgeEvents, attendanceBounds)
+		if len(effectiveBadgeEvents) > 0 {
+			summary.FirstAccess = effectiveBadgeEvents[0].Timestamp
+			summary.LastAccess = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
+		} else if len(locationSessions) > 0 {
+			summary.FirstAccess = locationSessions[0].BeginAt
+			summary.LastAccess = locationSessions[len(locationSessions)-1].EndAt
+		}
+		if len(effectiveBadgeEvents) > 0 || len(locationSessions) > 0 {
+			summary.Duration = CombinedRetainedDuration(effectiveBadgeEvents, summary.FirstAccess, summary.LastAccess, locationSessions)
+		}
+		dayMap[dayKey] = summary
+	}
+
 	allowedDayKeys := map[string]struct{}{}
 	if trimmedMonthKey != "" {
 		dayKeys, err := monthDayKeys(trimmedMonthKey)
@@ -3452,8 +3484,6 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		return HistoricalStudentDay{}, false, err
 	}
 	realBadgeEvents := badgeEventsByLogin[login]
-	record.BadgeEvents = realBadgeEvents
-
 	attendanceBounds, err := loadHistoricalAttendanceBounds(dayKey, login)
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
@@ -3463,16 +3493,17 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
 	}
-	if len(realBadgeEvents) == 0 {
-		record.BadgeEvents = applyAttendanceBoundsFallback(nil, attendanceBounds)
-		if record.User.FirstAccess.IsZero() && attendanceBounds != nil {
-			record.User.FirstAccess = attendanceBounds.BeginAt
-		}
-		if record.User.LastAccess.IsZero() && attendanceBounds != nil {
-			record.User.LastAccess = attendanceBounds.EndAt
-		}
-		record.RetainedDuration = CombinedRetainedDuration(record.BadgeEvents, record.User.FirstAccess, record.User.LastAccess, record.LocationSessions)
+	effectiveBadgeEvents := applyAttendanceBoundsFallback(realBadgeEvents, attendanceBounds)
+	record.BadgeEvents = effectiveBadgeEvents
+	if len(effectiveBadgeEvents) > 0 {
+		record.User.FirstAccess = effectiveBadgeEvents[0].Timestamp
+		record.User.LastAccess = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
+	} else if len(record.LocationSessions) > 0 {
+		record.User.FirstAccess = record.LocationSessions[0].BeginAt
+		record.User.LastAccess = record.LocationSessions[len(record.LocationSessions)-1].EndAt
 	}
+	record.BadgeDuration = CombinedRetainedDuration(effectiveBadgeEvents, record.User.FirstAccess, record.User.LastAccess, nil)
+	record.RetainedDuration = CombinedRetainedDuration(effectiveBadgeEvents, record.User.FirstAccess, record.User.LastAccess, record.LocationSessions)
 	record.AttendancePosts, err = loadAttendancePosts(dayKey, login)
 	if err != nil {
 		return HistoricalStudentDay{}, false, err
