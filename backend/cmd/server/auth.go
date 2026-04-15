@@ -419,6 +419,7 @@ func applyPanbagnatAdminPolicy(user *authUser) {
 	// grant admin access anywhere else in the app.
 	user.IsAdmin = isPanbagnatAdmin(*user)
 	user.IsStaff = user.IsAdmin
+	user.FtIsStaff = user.IsAdmin
 }
 
 func isUserAllowedLoginOverride(user *authUser) bool {

@@ -677,6 +677,9 @@ func buildDailyReportUsers(processedUsers []User, dayKey string) ([]User, []User
 	if err != nil {
 		return nil, nil, err
 	}
+	if dayKey == currentRuntimeDayKey() {
+		refetchMissingApprenticesForReport(usersByLogin, settingsByLogin)
+	}
 
 	seenToday := make([]User, 0, len(logins))
 	expectedToday := make([]User, 0, len(logins))
@@ -723,6 +726,68 @@ func buildDailyReportUsers(processedUsers []User, dayKey string) ([]User, []User
 	})
 
 	return seenToday, expectedToday, nil
+}
+
+func refetchMissingApprenticesForReport(usersByLogin map[string]User, settingsByLogin map[string]UserSettings) {
+	now := time.Now()
+
+	for login, user := range usersByLogin {
+		if !user.FirstAccess.IsZero() {
+			continue
+		}
+
+		settings, hasSettings := settingsByLogin[login]
+		if hasSettings && settings.StatusOverridden {
+			continue
+		}
+
+		if hasSettings {
+			applyUserSettings(&user, settings)
+		}
+		if !user.IsApprentice {
+			usersByLogin[login] = user
+			continue
+		}
+
+		previous := user.IsApprentice
+		next, err := fetchApprenticeStatus(user.Login42)
+		if err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refetch missing apprentice status for %s before report: %v", user.Login42, err))
+			continue
+		}
+		if err := saveStudentStatusState(user.Login42, next, now, &previous); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist missing apprentice status for %s before report: %v", user.Login42, err))
+		}
+
+		nextDetected := statusFromSignals(next, user.Profile)
+		user.Status42 = nextDetected
+		user.IsApprentice = next
+		user.Status = nextDetected
+		if next {
+			user.Profile = Student
+		}
+		usersByLogin[login] = user
+
+		if previous == next {
+			continue
+		}
+
+		Log(fmt.Sprintf("[WATCHDOG] Detected a new status for %s before report generation: %s -> %s", user.Login42, statusLabel(previous), statusLabel(next)))
+		if err := saveDayProfile(currentRuntimeDayKey(), user); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refreshed day profile for %s before report: %v", user.Login42, err))
+		}
+		if currentUser, ok, err := loadCurrentUserByLogin(currentRuntimeDayKey(), user.Login42); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load current user %s before report refresh persistence: %v", user.Login42, err))
+		} else if ok {
+			currentUser.IsApprentice = user.IsApprentice
+			currentUser.Profile = user.Profile
+			currentUser.Status42 = user.Status42
+			currentUser.Status = user.Status
+			if err := saveCurrentUser(currentRuntimeDayKey(), currentUser); err != nil {
+				Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist refreshed current user %s before report: %v", user.Login42, err))
+			}
+		}
+	}
 }
 
 func ReportUsersForDay(dayKey string, users []User, postsByLogin map[string][]AttendancePostRecord) ([]User, error) {
