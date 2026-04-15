@@ -10,25 +10,32 @@ import (
 )
 
 type apiUserState struct {
-	ControlAccessID   int                 `json:"control_access_id"`
-	ControlAccessName string              `json:"control_access_name"`
-	Login42           string              `json:"login_42"`
-	ID42              string              `json:"id_42"`
-	IsApprentice      bool                `json:"is_apprentice"`
-	Status            string              `json:"status"`
-	PostResult        string              `json:"post_result,omitempty"`
-	Status42          string              `json:"status_42"`
-	StatusOverridden  bool                `json:"status_overridden"`
-	IsBlacklisted     bool                `json:"is_blacklisted"`
-	BadgePostingOff   bool                `json:"badge_posting_off"`
-	BlacklistReason   string              `json:"blacklist_reason,omitempty"`
-	Profile           string              `json:"profile"`
-	FirstAccess       *time.Time          `json:"first_access,omitempty"`
-	LastAccess        *time.Time          `json:"last_access,omitempty"`
-	DurationSeconds   int64               `json:"duration_seconds"`
-	DurationHuman     string              `json:"duration_human"`
-	ErrorMessage      string              `json:"error_message,omitempty"`
-	AttendancePosts   []apiAttendancePost `json:"attendance_posts,omitempty"`
+	ControlAccessID         int                 `json:"control_access_id"`
+	ControlAccessName       string              `json:"control_access_name"`
+	Login42                 string              `json:"login_42"`
+	ID42                    string              `json:"id_42"`
+	IsApprentice            bool                `json:"is_apprentice"`
+	Status                  string              `json:"status"`
+	PostResult              string              `json:"post_result,omitempty"`
+	Status42                string              `json:"status_42"`
+	StatusOverridden        bool                `json:"status_overridden"`
+	IsBlacklisted           bool                `json:"is_blacklisted"`
+	BadgePostingOff         bool                `json:"badge_posting_off"`
+	BlacklistReason         string              `json:"blacklist_reason,omitempty"`
+	Profile                 string              `json:"profile"`
+	FirstAccess             *time.Time          `json:"first_access,omitempty"`
+	LastAccess              *time.Time          `json:"last_access,omitempty"`
+	DurationSeconds         int64               `json:"duration_seconds"`
+	DurationHuman           string              `json:"duration_human"`
+	BadgeDurationSeconds    int64               `json:"badge_duration_seconds"`
+	BadgeDurationHuman      string              `json:"badge_duration_human"`
+	LogtimeDurationSeconds  int64               `json:"logtime_duration_seconds"`
+	LogtimeDurationHuman    string              `json:"logtime_duration_human"`
+	TotalDurationSeconds    int64               `json:"total_duration_seconds"`
+	TotalDurationHuman      string              `json:"total_duration_human"`
+	RequiredAttendanceHours *float64            `json:"required_attendance_hours,omitempty"`
+	ErrorMessage            string              `json:"error_message,omitempty"`
+	AttendancePosts         []apiAttendancePost `json:"attendance_posts,omitempty"`
 }
 
 type apiBadgeEvent struct {
@@ -422,39 +429,62 @@ func adminReportsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func adminReportDetailHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		dayKey := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/reports/"))
+		if dayKey == "" || strings.Contains(dayKey, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		loc, err := time.LoadLocation("Europe/Paris")
+		if err != nil {
+			loc = time.Local
+		}
+		parsed, err := time.ParseInLocation("2006-01-02", dayKey, loc)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_date", "date must use YYYY-MM-DD format.")
+			return
+		}
+		dayKey = parsed.Format("2006-01-02")
+
+		users, live, postsByLogin, err := watchdog.ReportDetailForDay(dayKey)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "report_load_failed", "Could not load report detail.")
+			return
+		}
+		if len(users) == 0 {
+			writeJSONError(w, http.StatusNotFound, "report_not_found", "Report not found.")
+			return
+		}
+		writeJSON(w, http.StatusOK, mapReportDetailUsers(dayKey, users, live, postsByLogin))
+	case http.MethodPost:
+		if !strings.HasSuffix(strings.TrimSpace(r.URL.Path), "/regenerate") {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		regenDayKey := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(r.URL.Path, "/regenerate"), "/api/admin/reports/"))
+		if regenDayKey == "" || strings.Contains(regenDayKey, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		loc, err := time.LoadLocation("Europe/Paris")
+		if err != nil {
+			loc = time.Local
+		}
+		parsed, err := time.ParseInLocation("2006-01-02", regenDayKey, loc)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_date", "date must use YYYY-MM-DD format.")
+			return
+		}
+		regenDayKey = parsed.Format("2006-01-02")
+		if err := watchdog.RegenerateReportForDay(regenDayKey); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "report_regeneration_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, apiMessageResponse{Message: "Report regenerated."})
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-
-	dayKey := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/reports/"))
-	if dayKey == "" || strings.Contains(dayKey, "/") {
-		http.NotFound(w, r)
-		return
-	}
-
-	loc, err := time.LoadLocation("Europe/Paris")
-	if err != nil {
-		loc = time.Local
-	}
-	parsed, err := time.ParseInLocation("2006-01-02", dayKey, loc)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_date", "date must use YYYY-MM-DD format.")
-		return
-	}
-	dayKey = parsed.Format("2006-01-02")
-
-	users, _, postsByLogin, err := watchdog.ReportDetailForDay(dayKey)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "report_load_failed", "Could not load report detail.")
-		return
-	}
-	if len(users) == 0 {
-		writeJSONError(w, http.StatusNotFound, "report_not_found", "Report not found.")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, mapUsersWithPreservedReportState(users, postsByLogin))
 }
 
 func adminStudentDaysHandler(w http.ResponseWriter, r *http.Request) {
@@ -800,6 +830,43 @@ func mapUsersWithPreservedReportState(users []watchdog.User, postsByLogin map[st
 	return out
 }
 
+func mapReportDetailUsers(dayKey string, users []watchdog.User, live bool, postsByLogin map[string][]watchdog.AttendancePostRecord) []apiUserState {
+	out := make([]apiUserState, 0, len(users))
+	for _, user := range users {
+		login := strings.ToLower(strings.TrimSpace(user.Login42))
+		locationSessions := []watchdog.LocationSession(nil)
+		totalDuration := user.Duration
+
+		if live {
+			badgeEvents, _ := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(user.Login42)
+			locationSessions, _ = watchdog.SnapshotDailyLocationSessionsOrSchedule(user.Login42)
+			user.BadgeDuration = reportDurationForAPIUser(user)
+			totalDuration = watchdog.CombinedRetainedDuration(badgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
+		} else {
+			var err error
+			locationSessions, err = watchdog.HistoricalLocationSessionsForDay(login, dayKey)
+			if err != nil {
+				locationSessions = nil
+			}
+			if user.BadgeDuration == 0 {
+				user.BadgeDuration = reportDurationForAPIUser(user)
+			}
+		}
+
+		item := mapReportUserWithMetrics(user, totalDuration, locationSessions)
+		item.AttendancePosts = mapAttendancePosts(postsByLogin[login])
+		out = append(out, item)
+	}
+	return out
+}
+
+func reportDurationForAPIUser(user watchdog.User) time.Duration {
+	if user.LastAccess.After(user.FirstAccess) {
+		return user.LastAccess.Sub(user.FirstAccess)
+	}
+	return 0
+}
+
 func mapUser(user watchdog.User) *apiUserState {
 	return mapUserWithDuration(user, user.Duration)
 }
@@ -832,25 +899,54 @@ func mapUserWithDuration(user watchdog.User, retainedDuration time.Duration) *ap
 		effectiveStatus = detectedStatus
 	}
 	return &apiUserState{
-		ControlAccessID:   user.ControlAccessID,
-		ControlAccessName: user.ControlAccessName,
-		Login42:           user.Login42,
-		ID42:              user.ID42,
-		IsApprentice:      user.IsApprentice,
-		Status:            effectiveStatus,
-		PostResult:        user.PostResult,
-		Status42:          detectedStatus,
-		StatusOverridden:  user.StatusOverridden,
-		IsBlacklisted:     user.IsBlacklisted,
-		BadgePostingOff:   user.BadgePostingOff,
-		BlacklistReason:   user.BlacklistReason,
-		Profile:           profileToString(user.Profile),
-		FirstAccess:       timePtr(user.FirstAccess),
-		LastAccess:        timePtr(user.LastAccess),
-		DurationSeconds:   int64(retainedDuration / time.Second),
-		DurationHuman:     retainedDuration.String(),
-		ErrorMessage:      errorMessageString(user.Error),
+		ControlAccessID:         user.ControlAccessID,
+		ControlAccessName:       user.ControlAccessName,
+		Login42:                 user.Login42,
+		ID42:                    user.ID42,
+		IsApprentice:            user.IsApprentice,
+		Status:                  effectiveStatus,
+		PostResult:              user.PostResult,
+		Status42:                detectedStatus,
+		StatusOverridden:        user.StatusOverridden,
+		IsBlacklisted:           user.IsBlacklisted,
+		BadgePostingOff:         user.BadgePostingOff,
+		BlacklistReason:         user.BlacklistReason,
+		Profile:                 profileToString(user.Profile),
+		FirstAccess:             timePtr(user.FirstAccess),
+		LastAccess:              timePtr(user.LastAccess),
+		DurationSeconds:         int64(retainedDuration / time.Second),
+		DurationHuman:           retainedDuration.String(),
+		BadgeDurationSeconds:    int64(user.BadgeDuration / time.Second),
+		BadgeDurationHuman:      user.BadgeDuration.String(),
+		LogtimeDurationSeconds:  0,
+		LogtimeDurationHuman:    (time.Duration(0)).String(),
+		TotalDurationSeconds:    int64(retainedDuration / time.Second),
+		TotalDurationHuman:      retainedDuration.String(),
+		RequiredAttendanceHours: user.RequiredHours,
+		ErrorMessage:            errorMessageString(user.Error),
 	}
+}
+
+func sumLocationSessionDuration(sessions []watchdog.LocationSession) time.Duration {
+	var total time.Duration
+	for _, session := range sessions {
+		if session.EndAt.After(session.BeginAt) {
+			total += session.EndAt.Sub(session.BeginAt)
+		}
+	}
+	return total
+}
+
+func mapReportUserWithMetrics(user watchdog.User, totalDuration time.Duration, locationSessions []watchdog.LocationSession) apiUserState {
+	item := mapUserWithDuration(user, totalDuration)
+	logtimeDuration := sumLocationSessionDuration(locationSessions)
+	item.LogtimeDurationSeconds = int64(logtimeDuration / time.Second)
+	item.LogtimeDurationHuman = logtimeDuration.String()
+	item.TotalDurationSeconds = int64(totalDuration / time.Second)
+	item.TotalDurationHuman = totalDuration.String()
+	item.DurationSeconds = item.TotalDurationSeconds
+	item.DurationHuman = item.TotalDurationHuman
+	return *item
 }
 
 func mapUserPtrWithDuration(user watchdog.User, retainedDuration time.Duration, ok bool) *apiUserState {

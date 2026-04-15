@@ -31,6 +31,7 @@ type AttendancePostRecord struct {
 type HistoricalStudentDay struct {
 	DayKey           string                 `json:"day_key"`
 	User             User                   `json:"user"`
+	CalendarDay      StudentCalendarDay     `json:"calendar_day"`
 	BadgeEvents      []BadgeEvent           `json:"badge_events"`
 	LocationSessions []LocationSession      `json:"location_sessions"`
 	AttendancePosts  []AttendancePostRecord `json:"attendance_posts"`
@@ -170,6 +171,9 @@ CREATE TABLE IF NOT EXISTS watchdog_daily_student_summaries (
 	last_access TEXT,
 	badge_duration_seconds BIGINT NOT NULL DEFAULT 0,
 	retained_duration_seconds BIGINT NOT NULL DEFAULT 0,
+	day_type TEXT NOT NULL DEFAULT '',
+	day_type_label TEXT NOT NULL DEFAULT '',
+	required_attendance_hours DOUBLE PRECISION,
 	status TEXT NOT NULL DEFAULT '',
 	post_result TEXT NOT NULL DEFAULT '',
 	error_message TEXT,
@@ -374,8 +378,16 @@ func migrateDailyStudentSummariesTable() error {
 		return nil
 	}
 
-	if _, err := storageExec(`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS post_result TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
+	alterStatements := []string{
+		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS post_result TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS day_type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS day_type_label TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS required_attendance_hours DOUBLE PRECISION`,
+	}
+	for _, statement := range alterStatements {
+		if _, err := storageExec(statement); err != nil {
+			return err
+		}
 	}
 
 	_, err := storageExec(`
@@ -1062,6 +1074,7 @@ func loadCurrentUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error)
 		user.IsApprentice = isApprentice == 1
 		user.Profile = ProfileType(profile)
 		user.Duration = time.Duration(durationSeconds) * time.Second
+		user.BadgeDuration = user.Duration
 		if firstAccess.Valid {
 			user.FirstAccess, err = time.Parse(time.RFC3339Nano, firstAccess.String)
 			if err != nil {
@@ -1619,7 +1632,7 @@ func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, err
 
 	query := `
 		SELECT control_access_id, control_access_name, login_42, id_42, is_apprentice, profile,
-			first_access, last_access, retained_duration_seconds, status, post_result, error_message
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, error_message
 		FROM watchdog_daily_student_summaries
 		WHERE day_key = ?
 	`
@@ -1642,7 +1655,11 @@ func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, err
 		var profile int
 		var firstAccess sql.NullString
 		var lastAccess sql.NullString
+		var badgeDurationSeconds int64
 		var durationSeconds int64
+		var dayType sql.NullString
+		var dayTypeLabel sql.NullString
+		var requiredHours sql.NullFloat64
 		var status sql.NullString
 		var postResult sql.NullString
 		var errorMessage sql.NullString
@@ -1656,7 +1673,11 @@ func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, err
 			&profile,
 			&firstAccess,
 			&lastAccess,
+			&badgeDurationSeconds,
 			&durationSeconds,
+			&dayType,
+			&dayTypeLabel,
+			&requiredHours,
 			&status,
 			&postResult,
 			&errorMessage,
@@ -1667,6 +1688,13 @@ func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, err
 		user.IsApprentice = isApprentice == 1
 		user.Profile = ProfileType(profile)
 		user.Duration = time.Duration(durationSeconds) * time.Second
+		user.BadgeDuration = time.Duration(badgeDurationSeconds) * time.Second
+		user.DayType = strings.TrimSpace(dayType.String)
+		user.DayTypeLabel = strings.TrimSpace(dayTypeLabel.String)
+		if requiredHours.Valid {
+			value := requiredHours.Float64
+			user.RequiredHours = &value
+		}
 		user.Status = status.String
 		user.PostResult = postResult.String
 		normalizeHistoricalSummaryStatus(&user)
@@ -3290,8 +3318,8 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 	_, err := storageExec(`
 		INSERT INTO watchdog_daily_student_summaries (
 			day_key, login_42, control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, post_result, error_message, finalized_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, error_message, finalized_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day_key, login_42) DO UPDATE SET
 			control_access_id = excluded.control_access_id,
 			control_access_name = excluded.control_access_name,
@@ -3302,6 +3330,9 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 			last_access = excluded.last_access,
 			badge_duration_seconds = excluded.badge_duration_seconds,
 			retained_duration_seconds = excluded.retained_duration_seconds,
+			day_type = excluded.day_type,
+			day_type_label = excluded.day_type_label,
+			required_attendance_hours = excluded.required_attendance_hours,
 			status = excluded.status,
 			post_result = excluded.post_result,
 			error_message = excluded.error_message,
@@ -3318,6 +3349,9 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 		lastAccess,
 		int64(record.BadgeDuration/time.Second),
 		int64(record.RetainedDuration/time.Second),
+		strings.TrimSpace(record.CalendarDay.DayType),
+		strings.TrimSpace(record.CalendarDay.DayTypeLabel),
+		record.CalendarDay.RequiredAttendanceHours,
 		record.User.Status,
 		record.User.PostResult,
 		errorMessage,
@@ -3340,6 +3374,9 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		lastAccessRaw   sql.NullString
 		badgeSeconds    int64
 		retainedSeconds int64
+		dayType         sql.NullString
+		dayTypeLabel    sql.NullString
+		requiredHours   sql.NullFloat64
 		status          sql.NullString
 		postResult      sql.NullString
 		errorMessage    sql.NullString
@@ -3347,7 +3384,7 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 
 	err := storageQueryRow(`
 		SELECT control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, status, post_result, error_message
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, error_message
 		FROM watchdog_daily_student_summaries
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(
@@ -3360,6 +3397,9 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		&lastAccessRaw,
 		&badgeSeconds,
 		&retainedSeconds,
+		&dayType,
+		&dayTypeLabel,
+		&requiredHours,
 		&status,
 		&postResult,
 		&errorMessage,
@@ -3380,6 +3420,16 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 	normalizeHistoricalSummaryStatus(&record.User)
 	record.BadgeDuration = time.Duration(badgeSeconds) * time.Second
 	record.RetainedDuration = time.Duration(retainedSeconds) * time.Second
+	record.CalendarDay.DayType = strings.TrimSpace(dayType.String)
+	record.CalendarDay.DayTypeLabel = strings.TrimSpace(dayTypeLabel.String)
+	if requiredHours.Valid {
+		value := requiredHours.Float64
+		record.CalendarDay.RequiredAttendanceHours = &value
+	}
+	record.User.BadgeDuration = record.BadgeDuration
+	record.User.DayType = record.CalendarDay.DayType
+	record.User.DayTypeLabel = record.CalendarDay.DayTypeLabel
+	record.User.RequiredHours = record.CalendarDay.RequiredAttendanceHours
 
 	if firstAccessRaw.Valid {
 		record.User.FirstAccess, err = time.Parse(time.RFC3339Nano, firstAccessRaw.String)
@@ -3666,14 +3716,30 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 	for _, login := range logins {
 		user, ok := usersByLogin[login]
 		if !ok {
-			continue
+			user = User{
+				Login42:  login,
+				Profile:  Student,
+				Status:   "student",
+				Status42: "student",
+			}
+			if summary, summaryOK, summaryErr := AdminUserByLogin(login); summaryErr != nil {
+				return summaryErr
+			} else if summaryOK {
+				user.IsApprentice = summary.IsApprentice
+				user.Profile = summary.Profile
+				user.Status = summary.Status
+				user.Status42 = summary.Status42
+				user.StatusOverridden = summary.StatusOverridden
+				user.IsBlacklisted = summary.IsBlacklisted
+				user.BadgePostingOff = summary.BadgePostingOff
+				user.BlacklistReason = summary.BlacklistReason
+			}
 		}
 		user.Login42 = login
 		attendancePosts, err := loadAttendancePosts(dayKey, login)
 		if err != nil {
 			return err
 		}
-		PopulateUserPostResult(&user, attendancePosts)
 
 		realBadgeEvents := badgeEventsByLogin[login]
 		locationSessions, attendanceBounds, locationErr, attendanceErr := fetchSupplementalDayData(login, dayKey, true, len(realBadgeEvents) == 0)
@@ -3699,10 +3765,23 @@ func finalizeDayWithOverrides(dayKey string, overrides []User) error {
 		}
 
 		effectiveBadgeEvents := applyAttendanceBoundsFallback(realBadgeEvents, attendanceBounds)
+		if user.FirstAccess.IsZero() && len(effectiveBadgeEvents) > 0 {
+			user.FirstAccess = effectiveBadgeEvents[0].Timestamp
+		}
+		if user.LastAccess.IsZero() && len(effectiveBadgeEvents) > 0 {
+			user.LastAccess = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
+		}
+		user.Duration = CombinedRetainedDuration(effectiveBadgeEvents, user.FirstAccess, user.LastAccess, nil)
+		PopulateUserPostResult(&user, attendancePosts)
+		calendarDay, calendarErr := loadStudentCalendarDay(login, dayKey)
+		if calendarErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while finalizing report: %v", login, dayKey, calendarErr))
+		}
 
 		record := HistoricalStudentDay{
 			DayKey:           dayKey,
 			User:             user,
+			CalendarDay:      calendarDay,
 			BadgeEvents:      effectiveBadgeEvents,
 			LocationSessions: locationSessions,
 			RetainedDuration: CombinedRetainedDuration(effectiveBadgeEvents, user.FirstAccess, user.LastAccess, locationSessions),
@@ -3807,6 +3886,11 @@ func HistoricalStudentDayByLogin(login, dayKey string) (HistoricalStudentDay, bo
 	}
 	Trace("BUILD", "historical student day load done for %s on %s: sessions=%d attendance_bounds=%t badge_events=%d", login, dayKey, len(cachedSessions), cachedAttendanceBounds != nil, len(badgeEvents))
 	return record, true, nil
+}
+
+func HistoricalLocationSessionsForDay(login, dayKey string) ([]LocationSession, error) {
+	ensureRuntimeDayState()
+	return loadHistoricalLocationSessions(dayKey, login)
 }
 
 func CurrentUsers() ([]User, error) {

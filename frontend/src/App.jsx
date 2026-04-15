@@ -188,6 +188,27 @@ function formatRequiredAttendanceHours(hours) {
   }).format(hours)}h`;
 }
 
+function getPresenceTargetStatus(summary) {
+  const requiredHours = Number(summary?.required_attendance_hours);
+  const durationSeconds = Number(summary?.duration_seconds);
+  if (!Number.isFinite(requiredHours) || requiredHours <= 0 || !Number.isFinite(durationSeconds)) {
+    return "";
+  }
+  return durationSeconds >= Math.round(requiredHours * 3600) ? "success" : "warning";
+}
+
+function formatDurationPadded(seconds, fallback) {
+  const raw = formatDuration(seconds, fallback);
+  const match = String(raw).match(/^(?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s$/);
+  if (!match) {
+    return raw;
+  }
+  const hours = String(match[1] || 0).padStart(2, "0");
+  const minutes = String(match[2] || 0).padStart(2, "0");
+  const secs = String(match[3] || 0).padStart(2, "0");
+  return `${hours}h ${minutes}m ${secs}s`;
+}
+
 function getDetectedStatus(user) {
   const raw = String(user?.status_42 || "").trim().toLowerCase();
   return raw || "student";
@@ -267,32 +288,102 @@ function sortReportUsers(users) {
   return { successes, failures };
 }
 
-function padCenter(value, width) {
-  const text = String(value || "");
-  if (text.length >= width) {
-    return text;
+function getReportExpectedSeconds(user) {
+  const hours = Number(user?.required_attendance_hours);
+  if (!Number.isFinite(hours)) {
+    return null;
   }
-  const total = width - text.length;
-  const left = Math.floor(total / 2);
-  const right = total - left;
-  return `${" ".repeat(left)}${text}${" ".repeat(right)}`;
+  return Math.round(hours * 3600);
+}
+
+function getReportDurationTone(user) {
+  const expectedSeconds = getReportExpectedSeconds(user);
+  const totalSeconds = Number(user?.total_duration_seconds ?? user?.duration_seconds);
+  if (!Number.isFinite(expectedSeconds) || !Number.isFinite(totalSeconds)) {
+    return "neutral";
+  }
+  const delta = totalSeconds - expectedSeconds;
+  if (delta >= 0) {
+    return "success";
+  }
+  if (delta >= -30 * 60) {
+    return "warning";
+  }
+  return "danger";
 }
 
 function getReportLineTone(user, isLiveDay = false) {
-  if (isReportLineSuccess(user)) {
+  if (!isLiveDay && !isReportLineSuccess(user)) {
+    return "danger";
+  }
+  if (isLiveDay) {
+    if (!user?.first_access) {
+      return "warning";
+    }
     return "success";
   }
-  return isLiveDay ? "warning" : "danger";
+  return "success";
 }
 
-function buildReportLine(user, isLiveDay = false) {
-  const success = isReportLineSuccess(user);
+function getReportRangeTone(user) {
+  const first = user?.first_access ? new Date(user.first_access) : null;
+  const last = user?.last_access ? new Date(user.last_access) : null;
+  const isFirstWarning = first instanceof Date && !Number.isNaN(first.getTime()) && isBeforeApprenticeStart(first);
+  const isLastWarning = last instanceof Date && !Number.isNaN(last.getTime()) && getTimelineMinutes(last) > APPRENTICE_END_MINUTES;
+  return isFirstWarning || isLastWarning ? "warning" : "neutral";
+}
+
+function buildReportLine(user, isLiveDay = false, options = {}) {
+  const { onLoginClick = null } = options;
   const message = getReportLineMessage(user, isLiveDay);
   const { first, last } = getReportLineTimes(user);
+  const success = isReportLineSuccess(user);
   const emoji = success ? "✅" : isLiveDay ? "⏳" : "❌";
-  const login = String(user?.login_42 || "").padEnd(8, " ");
-  const duration = padCenter(`(${formatCompactDuration(user?.duration_seconds, user?.duration_human)})`, 10);
-  return `${emoji} ${login}: ${first}-${last}  ${duration}  — ${message}`;
+  const isErrorLine = !isLiveDay && !success;
+  const rangeTone = isErrorLine ? "neutral" : getReportRangeTone(user);
+  const totalTone = isErrorLine ? "neutral" : getReportDurationTone(user);
+  const logtimeTone = isErrorLine ? "neutral" : "neutral";
+
+  return (
+    <>
+      <span className="report-line-prefix">
+        <span className="report-line-emoji">{emoji}</span>
+        {typeof onLoginClick === "function" ? (
+          <button type="button" className="report-line-login report-line-login-button" onClick={onLoginClick}>
+            {String(user?.login_42 || "")}
+          </button>
+        ) : (
+          <span className="report-line-login">{String(user?.login_42 || "")}</span>
+        )}
+        <span className="report-line-separator">:</span>
+      </span>
+      <span className="report-line-block">
+        <span className="report-line-label">Badge:</span>
+        <span className={`report-line-range${rangeTone !== "neutral" ? ` report-line-range-${rangeTone}` : ""}`}>
+          {first}-{last}
+        </span>
+        <span className={`report-line-duration report-line-duration-${totalTone}`}>
+          ({formatCompactDuration(user?.badge_duration_seconds, user?.badge_duration_human)})
+        </span>
+      </span>
+      <span className="report-line-separator">|</span>
+      <span className="report-line-block">
+        <span className="report-line-label">Logtime:</span>
+        <span className={`report-line-duration${logtimeTone !== "neutral" ? ` report-line-duration-${logtimeTone}` : ""}`}>
+          ({formatCompactDuration(user?.logtime_duration_seconds, user?.logtime_duration_human)})
+        </span>
+      </span>
+      <span className="report-line-separator">|</span>
+      <span className="report-line-block">
+        <span className="report-line-label">Total:</span>
+        <span className={`report-line-duration report-line-duration-${totalTone}`}>
+          ({formatCompactDuration(user?.total_duration_seconds, user?.total_duration_human)})
+        </span>
+      </span>
+      <span className="report-line-separator">—</span>
+      <span className="report-line-message">{message}</span>
+    </>
+  );
 }
 
 function readAdminUserFiltersFromURL() {
@@ -317,6 +408,20 @@ function readAdminUserFiltersFromURL() {
             staff: false,
             extern: false
           }
+  };
+}
+
+function readAdminUserDetailSelectionFromURL() {
+  const query = new URLSearchParams(window.location.search);
+  const today = new Date();
+  const fallbackMonth = formatMonthKey(today);
+  const fallbackDay = formatDayKey(today);
+  const month = String(query.get("month") || "").trim();
+  const date = String(query.get("date") || "").trim();
+
+  return {
+    monthKey: /^\d{4}-\d{2}$/.test(month) ? month : fallbackMonth,
+    selectedDayKey: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : fallbackDay
   };
 }
 
@@ -1647,6 +1752,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
   const [reportsState, setReportsState] = useState({ loading: true, error: "", items: [] });
   const [expandedDays, setExpandedDays] = useState(() => new Set());
   const [detailsByDay, setDetailsByDay] = useState({});
+  const [regeneratingDay, setRegeneratingDay] = useState("");
 
   async function loadReports() {
     setReportsState((current) => ({ ...current, loading: true, error: "" }));
@@ -1704,6 +1810,31 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
           items: current[dayKey]?.items || []
         }
       }));
+    }
+  }
+
+  async function regenerateReportDay(dayKey) {
+    setRegeneratingDay(dayKey);
+    try {
+      const { response, json, text } = await requestJSON(`/api/admin/reports/${encodeURIComponent(dayKey)}/regenerate`, {
+        method: "POST"
+      });
+      if (!response.ok) {
+        throw new Error((json && json.message) || text || "Unable to regenerate this report day.");
+      }
+      await loadReports();
+      await loadReportDay(dayKey);
+    } catch (regenError) {
+      setDetailsByDay((current) => ({
+        ...current,
+        [dayKey]: {
+          loading: false,
+          error: regenError instanceof Error ? regenError.message : String(regenError),
+          items: current[dayKey]?.items || []
+        }
+      }));
+    } finally {
+      setRegeneratingDay("");
     }
   }
 
@@ -1772,6 +1903,21 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                       <span>{report.day}</span>
                     </div>
                     <div className="report-day-stats">
+                      {!report.live ? (
+                        <button
+                          type="button"
+                          className="report-regenerate-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void regenerateReportDay(report.day);
+                          }}
+                          disabled={regeneratingDay === report.day}
+                          aria-label={regeneratingDay === report.day ? "Regeneration en cours" : "Regenerer le rapport"}
+                          title={regeneratingDay === report.day ? "Regeneration en cours" : "Regenerer le rapport"}
+                        >
+                          {regeneratingDay === report.day ? "⟳" : "🔄"}
+                        </button>
+                      ) : null}
                       <span>{report.student_count} alternants</span>
                       <span>{report.posted_count} posts</span>
                       {report.live ? (
@@ -1807,7 +1953,13 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                                   }
 
                                   const tone = getReportLineTone(student, report.live);
-                                  const line = buildReportLine(student, report.live);
+                                  const reportMonthKey = String(report.day || "").slice(0, 7);
+                                  const line = buildReportLine(student, report.live, {
+                                    onLoginClick: () =>
+                                      onNavigate(
+                                        `/admin/${encodeURIComponent(student.login_42)}?month=${encodeURIComponent(reportMonthKey)}&date=${encodeURIComponent(report.day)}`
+                                      )
+                                  });
 
                                   return (
                                     <div
@@ -1900,7 +2052,24 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
 
             const content = (
               <>
-                <span className="presence-day-number">{cell.dayNumber}</span>
+                <span className="presence-day-number-row">
+                  <span className="presence-day-number">{cell.dayNumber}</span>
+                  {cell.summary ? (
+                    (() => {
+                      if (cell.isFuture) {
+                        return null;
+                      }
+                      const targetStatus = getPresenceTargetStatus(cell.summary);
+                      return targetStatus ? (
+                        <span
+                          className={`presence-target-pill presence-target-pill-${targetStatus}`}
+                          aria-label={targetStatus === "success" ? "Objectif atteint" : "Objectif non atteint"}
+                          title={targetStatus === "success" ? "Objectif atteint" : "Objectif non atteint"}
+                        />
+                      ) : null;
+                    })()
+                  ) : null}
+                </span>
                 {cell.summary ? (
                   <>
                     {cell.summary.live ? <span className="calendar-live-pill">live</span> : null}
@@ -1951,8 +2120,6 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
   const dayRequestRef = useRef(0);
   const dayAbortRef = useRef(null);
   const isToday = dayKey === formatDayKey(new Date());
-  const dayMeta = getCalendarDayMeta(selectedDaySummary?.day_type, selectedDaySummary?.day_type_label);
-  const requiredAttendanceLabel = formatRequiredAttendanceHours(selectedDaySummary?.required_attendance_hours);
 
   async function loadDay(targetDay = dayKey, options = {}) {
     const { background = false } = options;
@@ -2057,6 +2224,17 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
   const lastBadge = badgeEvents.length > 0 ? badgeEvents[badgeEvents.length - 1] : null;
   const firstBadgeValue = firstBadge ? formatClockTime(firstBadge.timestamp, true) : "Aucun";
   const lastBadgeValue = lastBadge ? formatClockTime(lastBadge.timestamp, true) : "Aucun";
+  const expectedSeconds = typeof selectedDaySummary?.required_attendance_hours === "number"
+    ? Math.round(selectedDaySummary.required_attendance_hours * 3600)
+    : null;
+  const actualSeconds = state.payload?.tracked && state.payload?.user
+    ? Number(state.payload.user.duration_seconds || 0)
+    : 0;
+  const actualPresenceLabel = formatDurationPadded(actualSeconds, state.payload?.user?.duration_human || "0s");
+  const expectedPresenceLabel = expectedSeconds == null
+    ? "Non défini"
+    : formatDurationPadded(expectedSeconds, `${expectedSeconds}s`);
+  const isPresenceBelowExpected = expectedSeconds != null && actualSeconds < expectedSeconds;
 
   if (state.loading) {
     return <AdminUserDayDetailSkeleton dayKey={dayKey} />;
@@ -2076,14 +2254,16 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
               <KeyValue label="Badges" value={String(badgeEvents.length)} />
               <KeyValue label="Premier badge" value={firstBadgeValue} />
               <KeyValue label="Dernier badge" value={lastBadgeValue} />
-              <KeyValue label="Type" value={dayMeta.label} />
-              <KeyValue label="Heures attendues" value={requiredAttendanceLabel} />
               <KeyValue
-                label="Durée"
+                label="Heures présence"
                 value={
-                  state.payload.tracked && state.payload.user
-                    ? formatDuration(state.payload.user.duration_seconds, state.payload.user.duration_human)
-                    : "0s"
+                  <strong className="presence-hours-value">
+                    <span className={isPresenceBelowExpected ? "presence-hours-actual-warning" : "presence-hours-actual"}>
+                      {actualPresenceLabel}
+                    </span>
+                    <span className="presence-hours-separator"> / </span>
+                    <span className="presence-hours-expected">{expectedPresenceLabel}</span>
+                  </strong>
                 }
               />
             </div>
@@ -2109,9 +2289,10 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
 }
 
 function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggleView, onNavigate }) {
+  const initialSelection = readAdminUserDetailSelectionFromURL();
   const [state, setState] = useState({ loading: true, error: "", payload: null });
-  const [selectedDayKey, setSelectedDayKey] = useState(() => formatDayKey(new Date()));
-  const [selectedMonthKey, setSelectedMonthKey] = useState(() => formatMonthKey(new Date()));
+  const [selectedDayKey, setSelectedDayKey] = useState(() => initialSelection.selectedDayKey);
+  const [selectedMonthKey, setSelectedMonthKey] = useState(() => initialSelection.monthKey);
   const monthRequestRef = useRef(0);
   const monthAbortRef = useRef(null);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -2168,9 +2349,28 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
   }, []);
 
   useEffect(() => {
-    setSelectedDayKey(formatDayKey(new Date()));
-    setSelectedMonthKey(formatMonthKey(new Date()));
+    const nextSelection = readAdminUserDetailSelectionFromURL();
+    setSelectedDayKey(nextSelection.selectedDayKey);
+    setSelectedMonthKey(nextSelection.monthKey);
   }, [login]);
+
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    if (selectedMonthKey) {
+      query.set("month", selectedMonthKey);
+    } else {
+      query.delete("month");
+    }
+    if (selectedDayKey) {
+      query.set("date", selectedDayKey);
+    } else {
+      query.delete("date");
+    }
+    const nextURL = query.toString()
+      ? `/admin/${encodeURIComponent(login)}?${query.toString()}`
+      : `/admin/${encodeURIComponent(login)}`;
+    window.history.replaceState(window.history.state, "", nextURL);
+  }, [login, selectedMonthKey, selectedDayKey]);
 
   useEffect(() => {
     if (!state.payload) {
@@ -2572,11 +2772,15 @@ function App() {
   }
 
   function navigateTo(nextPath) {
-    if (!nextPath || nextPath === path) {
+    if (!nextPath) {
+      return;
+    }
+    const currentFullPath = `${window.location.pathname}${window.location.search}`;
+    if (nextPath === currentFullPath) {
       return;
     }
     window.history.pushState({}, "", nextPath);
-    setPath(nextPath);
+    setPath(window.location.pathname);
   }
 
   if (path === "/login") {

@@ -696,6 +696,9 @@ func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing 
 		if calendarErr != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while building report: %v", user.Login42, dayKey, calendarErr))
 		}
+		user.DayType = calendarDay.DayType
+		user.DayTypeLabel = calendarDay.DayTypeLabel
+		user.RequiredHours = calendarDay.RequiredAttendanceHours
 		isSchoolDay := isSchoolDayType(calendarDay.DayType)
 
 		if !user.FirstAccess.IsZero() {
@@ -837,7 +840,32 @@ func ReportDetailForDay(dayKey string) ([]User, bool, map[string][]AttendancePos
 	if err != nil {
 		return nil, false, nil, err
 	}
+	for index := range users {
+		if users[index].DayType != "" || users[index].DayTypeLabel != "" || users[index].RequiredHours != nil {
+			continue
+		}
+		calendarDay, calendarErr := loadStudentCalendarDay(users[index].Login42, targetDayKey)
+		if calendarErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while loading report detail: %v", users[index].Login42, targetDayKey, calendarErr))
+			continue
+		}
+		users[index].DayType = calendarDay.DayType
+		users[index].DayTypeLabel = calendarDay.DayTypeLabel
+		users[index].RequiredHours = calendarDay.RequiredAttendanceHours
+	}
 	return users, false, postsByLogin, nil
+}
+
+func RegenerateReportForDay(dayKey string) error {
+	ensureRuntimeDayState()
+	targetDayKey := strings.TrimSpace(dayKey)
+	if targetDayKey == "" {
+		return fmt.Errorf("missing day key")
+	}
+	if targetDayKey == currentRuntimeDayKey() {
+		return fmt.Errorf("cannot regenerate the live day")
+	}
+	return finalizeDayWithOverrides(targetDayKey, nil)
 }
 
 func resetUserDuration(user User) {

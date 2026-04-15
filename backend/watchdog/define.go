@@ -39,6 +39,10 @@ type User struct {
 	FirstAccess       time.Time     `json:"first_access"`
 	LastAccess        time.Time     `json:"last_access"`
 	Duration          time.Duration `json:"duration"`
+	BadgeDuration     time.Duration `json:"badge_duration"`
+	DayType           string        `json:"day_type"`
+	DayTypeLabel      string        `json:"day_type_label"`
+	RequiredHours     *float64      `json:"required_attendance_hours"`
 	Profile           ProfileType
 	Error             error
 }
