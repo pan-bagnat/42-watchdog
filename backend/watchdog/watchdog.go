@@ -828,15 +828,21 @@ func ReportDetailForDay(dayKey string) ([]User, bool, map[string][]AttendancePos
 	}
 
 	if targetDayKey == currentRuntimeDayKey() {
-		users, err := loadCurrentUsersForDay(targetDayKey, true)
+		finalized, err := isDayFinalized(targetDayKey)
 		if err != nil {
-			return nil, true, nil, err
+			return nil, false, nil, err
 		}
-		reportUsers, err := ReportUsersForDay(targetDayKey, users, postsByLogin)
-		return reportUsers, true, postsByLogin, err
+		if !finalized {
+			users, err := loadCurrentUsersForDay(targetDayKey, true)
+			if err != nil {
+				return nil, true, nil, err
+			}
+			reportUsers, err := ReportUsersForDay(targetDayKey, users, postsByLogin)
+			return reportUsers, true, postsByLogin, err
+		}
 	}
 
-	users, err := loadHistoricalUsersForDay(targetDayKey, true)
+	users, err := loadHistoricalReportUsersForDay(targetDayKey, true)
 	if err != nil {
 		return nil, false, nil, err
 	}
@@ -865,7 +871,23 @@ func RegenerateReportForDay(dayKey string) error {
 	if targetDayKey == currentRuntimeDayKey() {
 		return fmt.Errorf("cannot regenerate the live day")
 	}
-	return finalizeDayWithOverrides(targetDayKey, nil)
+	if err := finalizeDayWithOverrides(targetDayKey, nil); err != nil {
+		return err
+	}
+	postsByLogin, err := loadAttendancePostsForDay(targetDayKey)
+	if err != nil {
+		return err
+	}
+	users, err := loadHistoricalUsersForDay(targetDayKey, true)
+	if err != nil {
+		return err
+	}
+	reportUsers, err := ReportUsersForDay(targetDayKey, users, postsByLogin)
+	if err != nil {
+		return err
+	}
+	_, err = SaveDailyReportSnapshot(targetDayKey, reportUsers)
+	return err
 }
 
 func resetUserDuration(user User) {
@@ -1011,13 +1033,29 @@ func postApprenticesAttendancesLocked() {
 	if reportErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not build apprentices report: %v", reportErr))
 	}
+	reportUsers := make([]User, 0, len(seenToday)+len(expectedToday))
+	reportUsers = append(reportUsers, seenToday...)
+	reportUsers = append(reportUsers, expectedToday...)
+	reportRecords, snapshotErr := SaveDailyReportSnapshot(currentRuntimeDayKey(), reportUsers)
+	if snapshotErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist daily report snapshot: %v", snapshotErr))
+	}
+	reportRecordsByLogin := make(map[string]HistoricalStudentDay, len(reportRecords))
+	for _, record := range reportRecords {
+		reportRecordsByLogin[normalizeLogin(record.User.Login42)] = record
+	}
 
 	if len(seenToday) > 0 {
 		Log("[WATCHDOG] [POST] ├──────── Apprentices: Seen today")
 		for _, user := range seenToday {
 			msg := reportMessageForUser(user)
 			Log(formatPostInfo(user, parisLoc, msg))
-			addLogToMail(&htmlBody, user, parisLoc)
+			record, ok := reportRecordsByLogin[normalizeLogin(user.Login42)]
+			if ok {
+				addLogToMail(&htmlBody, record, parisLoc)
+			} else {
+				addLogToMail(&htmlBody, HistoricalStudentDay{User: user}, parisLoc)
+			}
 		}
 		htmlBody.WriteString(`<tr><td style="white-space: pre; font-size: 13px; padding: 1px; padding-left: 20px; padding-right: 20px; line-height: 1;">  </td></tr>`)
 		atLeastOneField = true
@@ -1027,7 +1065,12 @@ func postApprenticesAttendancesLocked() {
 		Log("[WATCHDOG] [POST] ├──────── Apprentices: Expected on a school day but not seen")
 		for _, user := range expectedToday {
 			Log(formatPostInfo(user, parisLoc, APPRENTICE_EXPECTED_ABSENT))
-			addLogToMail(&htmlBody, user, parisLoc)
+			record, ok := reportRecordsByLogin[normalizeLogin(user.Login42)]
+			if ok {
+				addLogToMail(&htmlBody, record, parisLoc)
+			} else {
+				addLogToMail(&htmlBody, HistoricalStudentDay{User: user}, parisLoc)
+			}
 		}
 		atLeastOneField = true
 	}
@@ -1055,7 +1098,8 @@ func PostApprenticesAttendances() {
 	postApprenticesAttendancesLocked()
 }
 
-func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
+func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *time.Location) {
+	user := record.User
 	color := "green"
 	firstColor := "green"
 	lastColor := "green"
@@ -1084,9 +1128,9 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 		lastFormated = "00:00:00"
 	}
 
-	if user.Duration < 5*time.Hour {
+	if record.BadgeDuration < 5*time.Hour {
 		durationColor = "red"
-	} else if user.Duration < 7*time.Hour {
+	} else if record.BadgeDuration < 7*time.Hour {
 		durationColor = "orange"
 	}
 
@@ -1103,7 +1147,9 @@ func addLogToMail(htmlBody *strings.Builder, user User, loc *time.Location) {
 	htmlBody.WriteString(`<span style="color:` + color + `;">` + fmt.Sprintf("%-8s", user.Login42) + `</span>: `)
 	htmlBody.WriteString(`<span style="color:` + firstColor + `;">` + firstFormated + `</span>-`)
 	htmlBody.WriteString(`<span style="color:` + lastColor + `;">` + lastFormated + `</span> `)
-	htmlBody.WriteString(`<span style="color:` + durationColor + `;">` + formatDuration(user.Duration) + `</span> — `)
+	htmlBody.WriteString(`<span style="color:` + durationColor + `;">` + formatDuration(record.BadgeDuration) + `</span> | `)
+	htmlBody.WriteString(`<span style="color:#666;">Logtime:</span> ` + formatDuration(LocationSessionsDuration(record.LocationSessions)) + ` | `)
+	htmlBody.WriteString(`<span style="color:#666;">Total:</span> ` + formatDuration(record.RetainedDuration) + ` — `)
 	htmlBody.WriteString(`<span style="color:` + color + `;">` + msg + `</span>`)
 	htmlBody.WriteString(`</td></tr>`)
 }

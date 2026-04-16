@@ -137,6 +137,21 @@ type apiAdminUserDetailResponse struct {
 	Days []apiAdminStudentDay `json:"days"`
 }
 
+type apiAdminStatsResponse struct {
+	SelectedWeekday             int                            `json:"selected_weekday"`
+	RestrictToPresenceWindow    bool                           `json:"restrict_to_presence_window"`
+	PresenceWindowStart         string                         `json:"presence_window_start"`
+	PresenceWindowEnd           string                         `json:"presence_window_end"`
+	AverageSeenByWeekday        []watchdog.AdminStatsBucket    `json:"average_seen_by_weekday"`
+	AveragePresenceByHour       []watchdog.AdminStatsBucket    `json:"average_presence_by_hour"`
+	AveragePresenceByWeekday    []watchdog.AdminStatsSeries    `json:"average_presence_by_weekday"`
+	UserTypeDistribution        []watchdog.AdminStatsTypeCount `json:"user_type_distribution"`
+	DoorUsage                   []watchdog.AdminStatsDoorCount `json:"door_usage"`
+	AverageDailyPresenceSeconds int64                          `json:"average_daily_presence_seconds"`
+	ObservedDayCount            int                            `json:"observed_day_count"`
+	FilteredUserCount           int                            `json:"filtered_user_count"`
+}
+
 func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
 	authUser := getAuthenticatedUser(r)
 	if authUser == nil {
@@ -426,6 +441,55 @@ func adminReportsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	statuses := r.URL.Query()["status"]
+	weekday := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("weekday")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 6 {
+			writeJSONError(w, http.StatusBadRequest, "invalid_weekday", "weekday must be between 0 (Monday) and 6 (Sunday).")
+			return
+		}
+		weekday = parsed
+	}
+
+	restrictToPresenceWindow := true
+	if raw := strings.TrimSpace(r.URL.Query().Get("restrict_window")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_restrict_window", "restrict_window must be a boolean.")
+			return
+		}
+		restrictToPresenceWindow = parsed
+	}
+
+	stats, err := watchdog.AdminStats(statuses, weekday, restrictToPresenceWindow)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "stats_load_failed", "Could not load admin statistics.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, apiAdminStatsResponse{
+		SelectedWeekday:             stats.SelectedWeekday,
+		RestrictToPresenceWindow:    stats.RestrictToPresenceWindow,
+		PresenceWindowStart:         stats.PresenceWindowStart,
+		PresenceWindowEnd:           stats.PresenceWindowEnd,
+		AverageSeenByWeekday:        stats.AverageSeenByWeekday,
+		AveragePresenceByHour:       stats.AveragePresenceByHour,
+		AveragePresenceByWeekday:    stats.AveragePresenceByWeekday,
+		UserTypeDistribution:        stats.UserTypeDistribution,
+		DoorUsage:                   stats.DoorUsage,
+		AverageDailyPresenceSeconds: stats.AverageDailyPresenceSeconds,
+		ObservedDayCount:            stats.ObservedDayCount,
+		FilteredUserCount:           stats.FilteredUserCount,
+	})
 }
 
 func adminReportDetailHandler(w http.ResponseWriter, r *http.Request) {
@@ -840,7 +904,7 @@ func mapReportDetailUsers(dayKey string, users []watchdog.User, live bool, posts
 		if live {
 			badgeEvents, _ := watchdog.SnapshotDailyEffectiveBadgeEventsOrSchedule(user.Login42)
 			locationSessions, _ = watchdog.SnapshotDailyLocationSessionsOrSchedule(user.Login42)
-			user.BadgeDuration = reportDurationForAPIUser(user)
+			user.BadgeDuration = watchdog.CombinedRetainedDuration(badgeEvents, user.FirstAccess, user.LastAccess, nil)
 			totalDuration = watchdog.CombinedRetainedDuration(badgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
 		} else {
 			var err error
@@ -849,7 +913,7 @@ func mapReportDetailUsers(dayKey string, users []watchdog.User, live bool, posts
 				locationSessions = nil
 			}
 			if user.BadgeDuration == 0 {
-				user.BadgeDuration = reportDurationForAPIUser(user)
+				user.BadgeDuration = watchdog.CombinedRetainedDuration(nil, user.FirstAccess, user.LastAccess, nil)
 			}
 		}
 
@@ -858,13 +922,6 @@ func mapReportDetailUsers(dayKey string, users []watchdog.User, live bool, posts
 		out = append(out, item)
 	}
 	return out
-}
-
-func reportDurationForAPIUser(user watchdog.User) time.Duration {
-	if user.LastAccess.After(user.FirstAccess) {
-		return user.LastAccess.Sub(user.FirstAccess)
-	}
-	return 0
 }
 
 func mapUser(user watchdog.User) *apiUserState {
@@ -927,19 +984,9 @@ func mapUserWithDuration(user watchdog.User, retainedDuration time.Duration) *ap
 	}
 }
 
-func sumLocationSessionDuration(sessions []watchdog.LocationSession) time.Duration {
-	var total time.Duration
-	for _, session := range sessions {
-		if session.EndAt.After(session.BeginAt) {
-			total += session.EndAt.Sub(session.BeginAt)
-		}
-	}
-	return total
-}
-
 func mapReportUserWithMetrics(user watchdog.User, totalDuration time.Duration, locationSessions []watchdog.LocationSession) apiUserState {
 	item := mapUserWithDuration(user, totalDuration)
-	logtimeDuration := sumLocationSessionDuration(locationSessions)
+	logtimeDuration := watchdog.LocationSessionsDuration(locationSessions)
 	item.LogtimeDurationSeconds = int64(logtimeDuration / time.Second)
 	item.LogtimeDurationHuman = logtimeDuration.String()
 	item.TotalDurationSeconds = int64(totalDuration / time.Second)

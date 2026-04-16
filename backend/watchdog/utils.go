@@ -159,6 +159,16 @@ func sumTimeRanges(ranges []TimeRange) time.Duration {
 	return total
 }
 
+func LocationSessionsDuration(sessions []LocationSession) time.Duration {
+	var total time.Duration
+	for _, session := range sessions {
+		if session.EndAt.After(session.BeginAt) {
+			total += session.EndAt.Sub(session.BeginAt)
+		}
+	}
+	return total
+}
+
 func CombinedRetainedDuration(badgeEvents []BadgeEvent, fallbackFirst, fallbackLast time.Time, locationSessions []LocationSession) time.Duration {
 	ranges := badgeRetainedRanges(badgeEvents, fallbackFirst, fallbackLast)
 	ranges = append(ranges, locationRetainedRanges(locationSessions)...)

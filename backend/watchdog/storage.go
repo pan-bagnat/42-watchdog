@@ -37,6 +37,7 @@ type HistoricalStudentDay struct {
 	AttendancePosts  []AttendancePostRecord `json:"attendance_posts"`
 	RetainedDuration time.Duration          `json:"retained_duration"`
 	BadgeDuration    time.Duration          `json:"badge_duration"`
+	IncludedInReport bool                   `json:"included_in_report"`
 }
 
 type DayAvailability struct {
@@ -176,6 +177,7 @@ CREATE TABLE IF NOT EXISTS watchdog_daily_student_summaries (
 	required_attendance_hours DOUBLE PRECISION,
 	status TEXT NOT NULL DEFAULT '',
 	post_result TEXT NOT NULL DEFAULT '',
+	included_in_report INTEGER NOT NULL DEFAULT 0,
 	error_message TEXT,
 	finalized_at TEXT NOT NULL,
 	PRIMARY KEY (day_key, login_42)
@@ -253,7 +255,7 @@ CREATE TABLE IF NOT EXISTS watchdog_finalized_days (
 
 const (
 	historicalMonthFetchWorkerCount = 4
-	historicalMonthFetchQueueSize   = 32
+	historicalMonthFetchQueueSize   = 512
 )
 
 func InitStorage() error {
@@ -383,6 +385,7 @@ func migrateDailyStudentSummariesTable() error {
 		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS day_type TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS day_type_label TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS required_attendance_hours DOUBLE PRECISION`,
+		`ALTER TABLE watchdog_daily_student_summaries ADD COLUMN IF NOT EXISTS included_in_report INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, statement := range alterStatements {
 		if _, err := storageExec(statement); err != nil {
@@ -1626,6 +1629,21 @@ func loadBadgeEventsForLogin(dayKey, login string) ([]BadgeEvent, error) {
 }
 
 func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error) {
+	return loadHistoricalUsersForDayFiltered(dayKey, apprenticesOnly, false)
+}
+
+func loadHistoricalReportUsersForDay(dayKey string, apprenticesOnly bool) ([]User, error) {
+	users, err := loadHistoricalUsersForDayFiltered(dayKey, apprenticesOnly, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(users) > 0 || dayKey == currentRuntimeDayKey() {
+		return users, nil
+	}
+	return loadHistoricalUsersForDayFiltered(dayKey, apprenticesOnly, false)
+}
+
+func loadHistoricalUsersForDayFiltered(dayKey string, apprenticesOnly bool, reportOnly bool) ([]User, error) {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return nil, nil
 	}
@@ -1639,6 +1657,9 @@ func loadHistoricalUsersForDay(dayKey string, apprenticesOnly bool) ([]User, err
 	args := []any{dayKey}
 	if apprenticesOnly {
 		query += ` AND is_apprentice = 1`
+	}
+	if reportOnly {
+		query += ` AND included_in_report = 1`
 	}
 	query += ` ORDER BY login_42`
 
@@ -1840,10 +1861,17 @@ func loadDailyReportSummaries() ([]DailyReportSummary, error) {
 			users []User
 			err   error
 		)
+		isFinalized := false
 		if dayKey == currentDayKey {
+			isFinalized, err = isDayFinalized(dayKey)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if dayKey == currentDayKey && !isFinalized {
 			users, err = loadCurrentUsersForDay(dayKey, true)
 		} else {
-			users, err = loadHistoricalUsersForDay(dayKey, true)
+			users, err = loadHistoricalReportUsersForDay(dayKey, true)
 		}
 		if err != nil {
 			return nil, err
@@ -1852,7 +1880,7 @@ func loadDailyReportSummaries() ([]DailyReportSummary, error) {
 		if err != nil {
 			return nil, err
 		}
-		report.Live = dayKey == currentDayKey
+		report.Live = dayKey == currentDayKey && !isFinalized
 		if report.StudentCount == 0 {
 			continue
 		}
@@ -3350,8 +3378,8 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 	_, err := storageExec(`
 		INSERT INTO watchdog_daily_student_summaries (
 			day_key, login_42, control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, error_message, finalized_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, included_in_report, error_message, finalized_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day_key, login_42) DO UPDATE SET
 			control_access_id = excluded.control_access_id,
 			control_access_name = excluded.control_access_name,
@@ -3367,6 +3395,7 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 			required_attendance_hours = excluded.required_attendance_hours,
 			status = excluded.status,
 			post_result = excluded.post_result,
+			included_in_report = excluded.included_in_report,
 			error_message = excluded.error_message,
 			finalized_at = excluded.finalized_at
 	`,
@@ -3386,6 +3415,7 @@ func saveHistoricalSummary(record HistoricalStudentDay) error {
 		record.CalendarDay.RequiredAttendanceHours,
 		record.User.Status,
 		record.User.PostResult,
+		boolToInt(record.IncludedInReport),
 		errorMessage,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	)
@@ -3399,24 +3429,25 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 
 	login = strings.ToLower(strings.TrimSpace(login))
 	var (
-		record          HistoricalStudentDay
-		isApprentice    int
-		profile         int
-		firstAccessRaw  sql.NullString
-		lastAccessRaw   sql.NullString
-		badgeSeconds    int64
-		retainedSeconds int64
-		dayType         sql.NullString
-		dayTypeLabel    sql.NullString
-		requiredHours   sql.NullFloat64
-		status          sql.NullString
-		postResult      sql.NullString
-		errorMessage    sql.NullString
+		record           HistoricalStudentDay
+		isApprentice     int
+		profile          int
+		firstAccessRaw   sql.NullString
+		lastAccessRaw    sql.NullString
+		badgeSeconds     int64
+		retainedSeconds  int64
+		dayType          sql.NullString
+		dayTypeLabel     sql.NullString
+		requiredHours    sql.NullFloat64
+		status           sql.NullString
+		postResult       sql.NullString
+		includedInReport int
+		errorMessage     sql.NullString
 	)
 
 	err := storageQueryRow(`
 		SELECT control_access_id, control_access_name, id_42, is_apprentice, profile,
-			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, error_message
+			first_access, last_access, badge_duration_seconds, retained_duration_seconds, day_type, day_type_label, required_attendance_hours, status, post_result, included_in_report, error_message
 		FROM watchdog_daily_student_summaries
 		WHERE day_key = ? AND login_42 = ?
 	`, dayKey, login).Scan(
@@ -3434,6 +3465,7 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 		&requiredHours,
 		&status,
 		&postResult,
+		&includedInReport,
 		&errorMessage,
 	)
 	if err == sql.ErrNoRows {
@@ -3449,6 +3481,7 @@ func loadHistoricalStudentDay(login, dayKey string) (HistoricalStudentDay, bool,
 	record.User.Profile = ProfileType(profile)
 	record.User.Status = status.String
 	record.User.PostResult = postResult.String
+	record.IncludedInReport = includedInReport == 1
 	normalizeHistoricalSummaryStatus(&record.User)
 	record.BadgeDuration = time.Duration(badgeSeconds) * time.Second
 	record.RetainedDuration = time.Duration(retainedSeconds) * time.Second
@@ -3686,6 +3719,18 @@ func markDayFinalized(dayKey string) error {
 	return err
 }
 
+func clearIncludedInReportForDay(dayKey string) error {
+	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
+		return nil
+	}
+	_, err := storageExec(`
+		UPDATE watchdog_daily_student_summaries
+		SET included_in_report = 0
+		WHERE day_key = ?
+	`, dayKey)
+	return err
+}
+
 func isDayFinalized(dayKey string) (bool, error) {
 	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
 		return false, nil
@@ -3699,6 +3744,86 @@ func isDayFinalized(dayKey string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func buildHistoricalReportRecord(dayKey string, user User, attendancePosts []AttendancePostRecord) (HistoricalStudentDay, error) {
+	login := normalizeLogin(user.Login42)
+	realBadgeEvents, err := loadBadgeEventsForLogin(dayKey, login)
+	if err != nil {
+		return HistoricalStudentDay{}, err
+	}
+
+	locationSessions, attendanceBounds, locationErr, attendanceErr := fetchSupplementalDayData(login, dayKey, true, len(realBadgeEvents) == 0)
+	if locationErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch historical locations for %s on %s: %v", login, dayKey, locationErr))
+		locationSessions = nil
+	}
+	if err := replaceHistoricalLocationSessions(dayKey, login, locationSessions); err != nil {
+		return HistoricalStudentDay{}, err
+	}
+	if len(realBadgeEvents) == 0 {
+		if attendanceErr != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not fetch Chronos attendance fallback for %s on %s: %v", login, dayKey, attendanceErr))
+		} else if err := replaceHistoricalAttendanceBounds(dayKey, login, attendanceBounds); err != nil {
+			return HistoricalStudentDay{}, err
+		}
+	}
+
+	calendarDay, calendarErr := loadStudentCalendarDay(login, dayKey)
+	if calendarErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while building report snapshot: %v", login, dayKey, calendarErr))
+	}
+
+	badgeDuration := CombinedRetainedDuration(realBadgeEvents, user.FirstAccess, user.LastAccess, nil)
+	retainedDuration := CombinedRetainedDuration(realBadgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
+	user.Login42 = login
+	user.BadgeDuration = badgeDuration
+	user.Duration = retainedDuration
+
+	return HistoricalStudentDay{
+		DayKey:           dayKey,
+		User:             user,
+		CalendarDay:      calendarDay,
+		BadgeEvents:      realBadgeEvents,
+		LocationSessions: locationSessions,
+		AttendancePosts:  attendancePosts,
+		RetainedDuration: retainedDuration,
+		BadgeDuration:    badgeDuration,
+	}, nil
+}
+
+func SaveDailyReportSnapshot(dayKey string, reportUsers []User) ([]HistoricalStudentDay, error) {
+	if storageDB == nil || strings.TrimSpace(dayKey) == "" {
+		return nil, nil
+	}
+
+	postsByLogin, err := loadAttendancePostsForDay(dayKey)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]HistoricalStudentDay, 0, len(reportUsers))
+	for _, user := range reportUsers {
+		record, err := buildHistoricalReportRecord(dayKey, user, postsByLogin[normalizeLogin(user.Login42)])
+		if err != nil {
+			return nil, err
+		}
+		record.IncludedInReport = true
+		records = append(records, record)
+	}
+
+	if err := clearIncludedInReportForDay(dayKey); err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		if err := saveHistoricalSummary(record); err != nil {
+			return nil, err
+		}
+	}
+	if err := markDayFinalized(dayKey); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 func finalizeDayWithOverrides(dayKey string, overrides []User) error {

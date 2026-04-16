@@ -25,6 +25,7 @@ func startHTTPServer(port string) {
 	http.Handle("/commands", requireAdminAuth(http.HandlerFunc(commandHandler)))
 	http.Handle("/api/admin/commands", requireAdminAuth(http.HandlerFunc(commandHandler)))
 	http.Handle("/api/admin/calendar", requireAdminAuth(http.HandlerFunc(adminCalendarHandler)))
+	http.Handle("/api/admin/stats", requireAdminAuth(http.HandlerFunc(adminStatsHandler)))
 	http.Handle("/api/admin/reports", requireAdminAuth(http.HandlerFunc(adminReportsHandler)))
 	http.Handle("/api/admin/reports/", requireAdminAuth(http.HandlerFunc(adminReportDetailHandler)))
 	http.Handle("/api/admin/student-days/", requireAdminAuth(http.HandlerFunc(adminStudentDaysHandler)))
@@ -35,6 +36,7 @@ func startHTTPServer(port string) {
 	http.Handle("/api/student/detail", requireUserAuth(http.HandlerFunc(studentDetailHandler)))
 	http.Handle("/api/student/me", requireUserAuth(http.HandlerFunc(studentMeHandler)))
 	http.Handle("/api/live", requireUserAuth(http.HandlerFunc(liveUpdatesHandler)))
+	http.Handle("/api/live/admin", requireAdminAuth(http.HandlerFunc(adminLiveUpdatesHandler)))
 
 	watchdog.Log(fmt.Sprintf("[HTTP] Listening on port %s", port))
 	watchdog.Log("[HTTP] ┌─ Available endpoints:")
@@ -46,6 +48,7 @@ func startHTTPServer(port string) {
 	watchdog.Log("       ├── /commands")
 	watchdog.Log("       ├── /api/admin/commands")
 	watchdog.Log("       ├── /api/admin/calendar")
+	watchdog.Log("       ├── /api/admin/stats")
 	watchdog.Log("       ├── /api/admin/reports")
 	watchdog.Log("       ├── /api/admin/reports/{day}")
 	watchdog.Log("       ├── /api/admin/student-days/{login}")
@@ -55,6 +58,7 @@ func startHTTPServer(port string) {
 	watchdog.Log("       ├── /api/student/detail")
 	watchdog.Log("       ├── /api/student/me")
 	watchdog.Log("       ├── /api/live")
+	watchdog.Log("       ├── /api/live/admin")
 	watchdog.Log("       └── /webhook/access-control")
 
 	if err := http.ListenAndServe(":"+port, nil); err != nil {

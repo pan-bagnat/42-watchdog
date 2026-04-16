@@ -29,19 +29,24 @@ type wsMessage struct {
 
 type wsHub struct {
 	mu      sync.Mutex
-	clients map[*websocket.Conn]struct{}
+	clients map[*websocket.Conn]wsClient
+}
+
+type wsClient struct {
+	Login   string
+	IsAdmin bool
 }
 
 func newWSHub() *wsHub {
 	return &wsHub{
-		clients: make(map[*websocket.Conn]struct{}),
+		clients: make(map[*websocket.Conn]wsClient),
 	}
 }
 
-func (hub *wsHub) add(conn *websocket.Conn) {
+func (hub *wsHub) add(conn *websocket.Conn, client wsClient) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
-	hub.clients[conn] = struct{}{}
+	hub.clients[conn] = client
 }
 
 func (hub *wsHub) remove(conn *websocket.Conn) {
@@ -59,13 +64,23 @@ func (hub *wsHub) broadcast(payload wsMessage) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 
-	for conn := range hub.clients {
+	for conn, client := range hub.clients {
+		if !shouldDeliverWSMessage(client, payload) {
+			continue
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
 		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
 			_ = conn.Close()
 			delete(hub.clients, conn)
 		}
 	}
+}
+
+func shouldDeliverWSMessage(client wsClient, payload wsMessage) bool {
+	if client.IsAdmin {
+		return true
+	}
+	return client.Login != "" && client.Login == strings.ToLower(strings.TrimSpace(payload.Login))
 }
 
 var liveUpdatesHub = newWSHub()
@@ -350,9 +365,15 @@ func buildLiveUpdateMonthPayload(login, monthKey string) (apiAdminUserDetailResp
 	return payload, true
 }
 
-func liveUpdatesHandler(w http.ResponseWriter, r *http.Request) {
+func handleLiveUpdates(w http.ResponseWriter, r *http.Request, adminFeed bool) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	authUser := getAuthenticatedUser(r)
+	if authUser == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
 		return
 	}
 
@@ -361,7 +382,10 @@ func liveUpdatesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	liveUpdatesHub.add(conn)
+	liveUpdatesHub.add(conn, wsClient{
+		Login:   strings.ToLower(strings.TrimSpace(authUser.FtLogin)),
+		IsAdmin: adminFeed,
+	})
 	defer func() {
 		liveUpdatesHub.remove(conn)
 		_ = conn.Close()
@@ -372,4 +396,12 @@ func liveUpdatesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func liveUpdatesHandler(w http.ResponseWriter, r *http.Request) {
+	handleLiveUpdates(w, r, false)
+}
+
+func adminLiveUpdatesHandler(w http.ResponseWriter, r *http.Request) {
+	handleLiveUpdates(w, r, true)
 }

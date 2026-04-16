@@ -30,6 +30,22 @@ const CALENDAR_DAY_TYPES = [
   { value: "holiday", label: "Jour férié" },
   { value: "weekend", label: "Week-end" }
 ];
+const ADMIN_STATUS_TILES = [
+  { key: "apprentice", label: "Alternant", emoji: "👨‍🎓" },
+  { key: "student", label: "Étudiant", emoji: "👶" },
+  { key: "pisciner", label: "Piscineux", emoji: "🏊‍♂️" },
+  { key: "staff", label: "Staff", emoji: "🛠️" },
+  { key: "extern", label: "Externe", emoji: "🌍" }
+];
+const STATS_WEEKDAYS = [
+  { value: 0, label: "Lundi" },
+  { value: 1, label: "Mardi" },
+  { value: 2, label: "Mercredi" },
+  { value: 3, label: "Jeudi" },
+  { value: 4, label: "Vendredi" },
+  { value: 5, label: "Samedi" },
+  { value: 6, label: "Dimanche" }
+];
 
 function isAdminUser(user) {
   if (!user) {
@@ -386,28 +402,46 @@ function buildReportLine(user, isLiveDay = false, options = {}) {
   );
 }
 
+function buildStatusFilters(statuses) {
+  const active = new Set((statuses || []).map((value) => String(value).trim().toLowerCase()).filter(Boolean));
+  if (active.size > 0) {
+    return {
+      apprentice: active.has("apprentice"),
+      student: active.has("student"),
+      pisciner: active.has("pisciner"),
+      staff: active.has("staff"),
+      extern: active.has("extern")
+    };
+  }
+  return {
+    apprentice: true,
+    student: false,
+    pisciner: false,
+    staff: false,
+    extern: false
+  };
+}
+
+function getActiveStatusKeys(statusFilters) {
+  return Object.entries(statusFilters || {})
+    .filter(([, checked]) => checked)
+    .map(([status]) => status);
+}
+
 function readAdminUserFiltersFromURL() {
   const query = new URLSearchParams(window.location.search);
-  const statuses = new Set(query.getAll("status").map((value) => value.trim().toLowerCase()).filter(Boolean));
   return {
     search: query.get("search") || "",
     date: query.get("date") || "",
-    statusFilters:
-      statuses.size > 0
-        ? {
-            apprentice: statuses.has("apprentice"),
-            student: statuses.has("student"),
-            pisciner: statuses.has("pisciner"),
-            staff: statuses.has("staff"),
-            extern: statuses.has("extern")
-          }
-        : {
-            apprentice: true,
-            student: false,
-            pisciner: false,
-            staff: false,
-            extern: false
-          }
+    statusFilters: buildStatusFilters(query.getAll("status"))
+  };
+}
+
+function readAdminStatsFiltersFromURL() {
+  const query = new URLSearchParams(window.location.search);
+  return {
+    statusFilters: buildStatusFilters(query.getAll("status")),
+    restrictWindow: String(query.get("restrict_window") || "").trim().toLowerCase() !== "false"
   };
 }
 
@@ -540,23 +574,35 @@ async function requestJSON(url, options = {}) {
   return { response, text, json };
 }
 
-const liveUpdateListeners = new Set();
-let liveUpdateSocket = null;
-let liveUpdateReconnectTimer = 0;
+const liveUpdateScopes = {
+  user: {
+    endpoint: "/api/live",
+    listeners: new Set(),
+    socket: null,
+    reconnectTimer: 0
+  },
+  admin: {
+    endpoint: "/api/live/admin",
+    listeners: new Set(),
+    socket: null,
+    reconnectTimer: 0
+  }
+};
 
-function ensureLiveUpdatesSocket() {
-  if (liveUpdateSocket && (liveUpdateSocket.readyState === WebSocket.OPEN || liveUpdateSocket.readyState === WebSocket.CONNECTING)) {
+function ensureLiveUpdatesSocket(scope = "user") {
+  const target = liveUpdateScopes[scope] || liveUpdateScopes.user;
+  if (target.socket && (target.socket.readyState === WebSocket.OPEN || target.socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}/api/live`;
-  liveUpdateSocket = new WebSocket(url);
+  const url = `${protocol}//${window.location.host}${target.endpoint}`;
+  target.socket = new WebSocket(url);
 
-  liveUpdateSocket.onmessage = (event) => {
+  target.socket.onmessage = (event) => {
     try {
       const payload = JSON.parse(event.data);
-      for (const listener of liveUpdateListeners) {
+      for (const listener of target.listeners) {
         listener(payload);
       }
     } catch {
@@ -564,43 +610,45 @@ function ensureLiveUpdatesSocket() {
     }
   };
 
-  liveUpdateSocket.onerror = () => {
-    liveUpdateSocket?.close();
+  target.socket.onerror = () => {
+    target.socket?.close();
   };
 
-  liveUpdateSocket.onclose = () => {
-    liveUpdateSocket = null;
-    if (liveUpdateReconnectTimer) {
-      window.clearTimeout(liveUpdateReconnectTimer);
-      liveUpdateReconnectTimer = 0;
+  target.socket.onclose = () => {
+    target.socket = null;
+    if (target.reconnectTimer) {
+      window.clearTimeout(target.reconnectTimer);
+      target.reconnectTimer = 0;
     }
-    if (liveUpdateListeners.size === 0) {
+    if (target.listeners.size === 0) {
       return;
     }
-    liveUpdateReconnectTimer = window.setTimeout(() => {
-      ensureLiveUpdatesSocket();
+    target.reconnectTimer = window.setTimeout(() => {
+      ensureLiveUpdatesSocket(scope);
     }, 2000);
   };
 }
 
-function subscribeToLiveUpdates(onEvent) {
+function subscribeToLiveUpdates(onEvent, options = {}) {
   if (typeof onEvent !== "function") {
     return () => {};
   }
-  liveUpdateListeners.add(onEvent);
-  ensureLiveUpdatesSocket();
+  const scope = options.scope === "admin" ? "admin" : "user";
+  const target = liveUpdateScopes[scope];
+  target.listeners.add(onEvent);
+  ensureLiveUpdatesSocket(scope);
 
   return () => {
-    liveUpdateListeners.delete(onEvent);
-    if (liveUpdateListeners.size > 0) {
+    target.listeners.delete(onEvent);
+    if (target.listeners.size > 0) {
       return;
     }
-    if (liveUpdateReconnectTimer) {
-      window.clearTimeout(liveUpdateReconnectTimer);
-      liveUpdateReconnectTimer = 0;
+    if (target.reconnectTimer) {
+      window.clearTimeout(target.reconnectTimer);
+      target.reconnectTimer = 0;
     }
-    if (liveUpdateSocket && (liveUpdateSocket.readyState === WebSocket.OPEN || liveUpdateSocket.readyState === WebSocket.CONNECTING)) {
-      liveUpdateSocket.close();
+    if (target.socket && (target.socket.readyState === WebSocket.OPEN || target.socket.readyState === WebSocket.CONNECTING)) {
+      target.socket.close();
     }
   };
 }
@@ -1311,8 +1359,9 @@ function AdminHeader({ user, badgeDelaySeconds, onLogout, onToggleView, activeSe
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
   const sections = [
-    { key: "students", label: "Étudiants", href: "/" },
-    { key: "reports", label: "Rapports", href: "/reports" }
+    { key: "students", label: "Étudiants", href: "/admin/students" },
+    { key: "stats", label: "Stats", href: "/admin/stats" },
+    { key: "reports", label: "Rapports", href: "/admin/reports" }
   ];
 
   useEffect(() => {
@@ -1485,7 +1534,7 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
           payload: mergeLiveDetailPayload(current.payload, event)
         }));
       }
-    });
+    }, { scope: "user" });
   }, [selectedMonthKey, user.ft_login]);
 
   function handleChangeMonth(delta) {
@@ -1528,10 +1577,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const activeStatuses = useMemo(
-    () => Object.entries(statusFilters).filter(([, checked]) => checked).map(([status]) => status),
-    [statusFilters]
-  );
+  const activeStatuses = useMemo(() => getActiveStatusKeys(statusFilters), [statusFilters]);
   const activeStatusKey = activeStatuses.join(",");
 
   async function loadUsers(currentSearch = searchInput, currentStatuses = activeStatuses, currentDate = dateInput) {
@@ -1584,7 +1630,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
       query.set("date", normalizedDate);
     }
     activeStatuses.forEach((status) => query.append("status", status));
-    const nextURL = query.toString() ? `/?${query.toString()}` : "/";
+    const nextURL = query.toString() ? `/admin/students?${query.toString()}` : "/admin/students";
     window.history.replaceState(window.history.state, "", nextURL);
   }, [searchInput, activeStatusKey, dateInput]);
 
@@ -1631,7 +1677,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
           )
         );
       }
-    });
+    }, { scope: "admin" });
   }, [searchInput, activeStatusKey, dateInput]);
 
   function toggleStatusFilter(status) {
@@ -1640,14 +1686,6 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
       [status]: !current[status]
     }));
   }
-
-  const statusTiles = [
-    { key: "apprentice", label: "Alternant", emoji: "👨‍🎓" },
-    { key: "student", label: "Étudiant", emoji: "👶" },
-    { key: "pisciner", label: "Piscineux", emoji: "🏊‍♂️" },
-    { key: "staff", label: "Staff", emoji: "🛠️" },
-    { key: "extern", label: "Externe", emoji: "🌍" }
-  ];
 
   return (
     <main className="app-shell">
@@ -1686,7 +1724,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
           </label>
           <div className="admin-filter-group">
             <div className="status-tile-group" role="group" aria-label="Filtre par statut">
-              {statusTiles.map((statusTile) => (
+              {ADMIN_STATUS_TILES.map((statusTile) => (
                 <button
                   key={statusTile.key}
                   type="button"
@@ -1717,7 +1755,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
                 key={currentUser.login_42}
                 className="user-list-row"
                 type="button"
-                onClick={() => onNavigate(`/admin/${encodeURIComponent(currentUser.login_42)}`)}
+                onClick={() => onNavigate(`/admin/students/${encodeURIComponent(currentUser.login_42)}`)}
               >
                 <UserAvatar user={currentUser} />
                 <div className="user-list-main">
@@ -1957,7 +1995,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
                                   const line = buildReportLine(student, report.live, {
                                     onLoginClick: () =>
                                       onNavigate(
-                                        `/admin/${encodeURIComponent(student.login_42)}?month=${encodeURIComponent(reportMonthKey)}&date=${encodeURIComponent(report.day)}`
+                                        `/admin/students/${encodeURIComponent(student.login_42)}?month=${encodeURIComponent(reportMonthKey)}&date=${encodeURIComponent(report.day)}`
                                       )
                                   });
 
@@ -1986,6 +2024,651 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
         )}
       </section>
     </main>
+  );
+}
+
+function formatDecimalValue(value, digits = 1) {
+  const numeric = Number(value || 0);
+  return new Intl.NumberFormat("fr-FR", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: digits
+  }).format(numeric);
+}
+
+function getStatusChartMeta(status) {
+  switch (String(status || "").trim().toLowerCase()) {
+    case "apprentice":
+      return { label: "Alternant", color: "#3fc6a8" };
+    case "student":
+      return { label: "Étudiant", color: "#62a4ff" };
+    case "pisciner":
+      return { label: "Piscineux", color: "#ffb347" };
+    case "staff":
+      return { label: "Staff", color: "#ff7d7d" };
+    case "extern":
+      return { label: "Externe", color: "#c8a6ff" };
+    default:
+      return { label: formatStatusLabel(status), color: "#a5b8b0" };
+  }
+}
+
+function StatsCard({ title, subtitle = "", children }) {
+  return (
+    <section className="stats-card">
+      <div className="stats-card-header">
+        <div>
+          <h3>{title}</h3>
+          {subtitle ? <p>{subtitle}</p> : null}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function VerticalBarChart({ data, formatValue = (value) => formatDecimalValue(value), valueSuffix = "", emptyLabel = "Aucune donnée." }) {
+  const safeData = Array.isArray(data) ? data : [];
+  const values = safeData.map((item) => Number(item?.value || 0));
+  const maxValue = values.reduce((current, value) => Math.max(current, value), 0);
+
+  if (safeData.length === 0) {
+    return <p className="feedback">{emptyLabel}</p>;
+  }
+
+  const width = 680;
+  const height = 280;
+  const paddingLeft = 56;
+  const paddingRight = 20;
+  const paddingTop = 20;
+  const paddingBottom = 48;
+  const chartWidth = width - paddingLeft - paddingRight;
+  const chartHeight = height - paddingTop - paddingBottom;
+  const tickCount = 5;
+  const roughStep = maxValue > 0 ? maxValue / tickCount : 1;
+  const magnitude = 10 ** Math.max(0, Math.floor(Math.log10(roughStep)));
+  const normalizedStep = roughStep / magnitude;
+  let niceStep = magnitude;
+  if (normalizedStep > 5) {
+    niceStep = 10 * magnitude;
+  } else if (normalizedStep > 2) {
+    niceStep = 5 * magnitude;
+  } else if (normalizedStep > 1) {
+    niceStep = 2 * magnitude;
+  }
+  const axisMax = maxValue > 0 ? Math.ceil(maxValue / niceStep) * niceStep : 1;
+  const ticks = Array.from({ length: tickCount + 1 }, (_, index) => {
+    const value = (axisMax / tickCount) * index;
+    const y = paddingTop + chartHeight - (value / axisMax) * chartHeight;
+    return { value, y };
+  });
+  const bandWidth = chartWidth / safeData.length;
+  const barWidth = Math.min(58, bandWidth * 0.7);
+
+  return (
+    <div className="chart-vertical-shell">
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-vertical-svg" role="img" aria-label="Graphique de présence moyenne par jour">
+        <defs>
+          <linearGradient id="chart-bar-gradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#56c8ad" />
+            <stop offset="100%" stopColor="#245ff4" />
+          </linearGradient>
+        </defs>
+        {ticks.map((tick) => (
+          <g key={tick.value}>
+            <line x1={paddingLeft} y1={tick.y} x2={width - paddingRight} y2={tick.y} className="chart-grid-line" />
+            <text x={paddingLeft - 10} y={tick.y + 4} textAnchor="end" className="chart-grid-label">
+              {formatValue(tick.value)}
+            </text>
+          </g>
+        ))}
+        <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + chartHeight} className="chart-axis" />
+        <line x1={paddingLeft} y1={paddingTop + chartHeight} x2={width - paddingRight} y2={paddingTop + chartHeight} className="chart-axis" />
+        {safeData.map((item, index) => {
+          const value = Number(item?.value || 0);
+          const barHeight = axisMax > 0 ? (value / axisMax) * chartHeight : 0;
+          const x = paddingLeft + bandWidth * index + (bandWidth - barWidth) / 2;
+          const y = paddingTop + chartHeight - barHeight;
+          return (
+            <g key={item.label}>
+              <text x={x + barWidth / 2} y={Math.max(y - 8, paddingTop + 12)} textAnchor="middle" className="chart-bar-value">
+                {formatValue(value)}
+                {valueSuffix}
+              </text>
+              <rect x={x} y={y} width={barWidth} height={Math.max(barHeight, 0)} rx="14" className="chart-bar-rect" />
+              <text x={x + barWidth / 2} y={height - 14} textAnchor="middle" className="chart-bar-label">
+                {item.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+function LineChart({ data, formatValue = (value) => formatDecimalValue(value), emptyLabel = "Aucune donnée." }) {
+  const safeData = Array.isArray(data) ? data : [];
+  const values = safeData.map((item) => Number(item?.value || 0));
+  const maxValue = values.reduce((current, value) => Math.max(current, value), 0);
+
+  if (safeData.length === 0) {
+    return <p className="feedback">{emptyLabel}</p>;
+  }
+
+  const width = 680;
+  const height = 260;
+  const paddingX = 28;
+  const paddingTop = 18;
+  const paddingBottom = 46;
+  const chartWidth = width - paddingX * 2;
+  const chartHeight = height - paddingTop - paddingBottom;
+  const points = safeData.map((item, index) => {
+    const x = safeData.length === 1 ? paddingX + chartWidth / 2 : paddingX + (chartWidth * index) / (safeData.length - 1);
+    const value = Number(item?.value || 0);
+    const y = paddingTop + chartHeight - (maxValue > 0 ? (value / maxValue) * chartHeight : 0);
+    return { x, y, value, label: item.label };
+  });
+  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+
+  return (
+    <div className="chart-line-shell">
+      <svg viewBox={`0 0 ${width} ${height}`} className="chart-line-svg" role="img" aria-label="Graphique de présence moyenne">
+        <line x1={paddingX} y1={paddingTop + chartHeight} x2={width - paddingX} y2={paddingTop + chartHeight} className="chart-axis" />
+        <line x1={paddingX} y1={paddingTop} x2={paddingX} y2={paddingTop + chartHeight} className="chart-axis" />
+        <path d={path} className="chart-line-path" />
+        {points.map((point) => (
+          <g key={point.label}>
+            <circle cx={point.x} cy={point.y} r="4" className="chart-line-dot" />
+            <text x={point.x} y={height - 16} textAnchor="middle" className="chart-line-label">
+              {point.label}
+            </text>
+            <text x={point.x} y={point.y - 10} textAnchor="middle" className="chart-line-value">
+              {formatValue(point.value)}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+const WEEKDAY_LINE_META = [
+  { key: "lun", label: "Lundi", shortLabel: "Lun", color: "#56c8ad" },
+  { key: "mar", label: "Mardi", shortLabel: "Mar", color: "#4f8df6" },
+  { key: "mer", label: "Mercredi", shortLabel: "Mer", color: "#ffb347" },
+  { key: "jeu", label: "Jeudi", shortLabel: "Jeu", color: "#ff7a7a" },
+  { key: "ven", label: "Vendredi", shortLabel: "Ven", color: "#b388ff" },
+  { key: "sam", label: "Samedi", shortLabel: "Sam", color: "#7ed957" },
+  { key: "dim", label: "Dimanche", shortLabel: "Dim", color: "#f78fb3" }
+];
+
+function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatValue = (value) => formatDecimalValue(value), emptyLabel = "Aucune donnée." }) {
+  const safeSeries = (Array.isArray(series) ? series : [])
+    .map((item, index) => {
+      const fallbackMeta = WEEKDAY_LINE_META[index] || WEEKDAY_LINE_META[0];
+      const key = String(item?.key || fallbackMeta.key || "").trim().toLowerCase();
+      const meta = WEEKDAY_LINE_META.find((candidate) => candidate.key === key) || fallbackMeta;
+      const values = Array.isArray(item?.values) ? item.values : [];
+      return {
+        key: meta.key,
+        label: meta.label,
+        shortLabel: meta.shortLabel,
+        color: meta.color,
+        values
+      };
+    })
+    .filter((item) => item.values.length > 0);
+  const visibleSeries = safeSeries.filter((item) => !disabledKeys.has(item.key));
+  const xLabels = safeSeries[0]?.values?.map((item) => item?.label || "") || [];
+  const allValues = visibleSeries.flatMap((item) => item.values.map((entry) => Number(entry?.value || 0)));
+  const maxValue = allValues.reduce((current, value) => Math.max(current, value), 0);
+
+  if (safeSeries.length === 0 || xLabels.length === 0) {
+    return <p className="feedback">{emptyLabel}</p>;
+  }
+
+  const width = 760;
+  const height = 320;
+  const paddingLeft = 54;
+  const paddingRight = 24;
+  const paddingTop = 20;
+  const paddingBottom = 54;
+  const chartWidth = width - paddingLeft - paddingRight;
+  const chartHeight = height - paddingTop - paddingBottom;
+  const tickCount = 5;
+  const axisMax = maxValue > 0 ? Math.ceil(maxValue / tickCount) * tickCount : 1;
+  const yTicks = Array.from({ length: tickCount + 1 }, (_, index) => {
+    const value = (axisMax / tickCount) * index;
+    const y = paddingTop + chartHeight - (value / axisMax) * chartHeight;
+    return { value, y };
+  });
+
+  return (
+    <div className="chart-multi-line-panel">
+      <div className="chart-multi-line-legend" role="group" aria-label="Jours affichés">
+        {safeSeries.map((item) => {
+          const disabled = disabledKeys.has(item.key);
+          return (
+            <button
+              key={item.key}
+              type="button"
+              className={`chart-multi-line-legend-item${disabled ? " chart-multi-line-legend-item-disabled" : ""}`}
+              onClick={() => onToggleSeries(item.key)}
+              aria-pressed={!disabled}
+            >
+              <span className="chart-multi-line-legend-swatch" style={{ backgroundColor: item.color }} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="chart-line-shell">
+        <svg viewBox={`0 0 ${width} ${height}`} className="chart-line-svg" role="img" aria-label="Graphique de présence moyenne par heure et par jour">
+          {yTicks.map((tick) => (
+            <g key={tick.value}>
+              <line x1={paddingLeft} y1={tick.y} x2={width - paddingRight} y2={tick.y} className="chart-grid-line" />
+              <text x={paddingLeft - 10} y={tick.y + 4} textAnchor="end" className="chart-grid-label">
+                {formatValue(tick.value)}
+              </text>
+            </g>
+          ))}
+          <line x1={paddingLeft} y1={paddingTop} x2={paddingLeft} y2={paddingTop + chartHeight} className="chart-axis" />
+          <line x1={paddingLeft} y1={paddingTop + chartHeight} x2={width - paddingRight} y2={paddingTop + chartHeight} className="chart-axis" />
+          {xLabels.map((label, index) => {
+            const x = xLabels.length === 1 ? paddingLeft + chartWidth / 2 : paddingLeft + (chartWidth * index) / (xLabels.length - 1);
+            return (
+              <text key={label} x={x} y={height - 16} textAnchor="middle" className="chart-line-label">
+                {label}
+              </text>
+            );
+          })}
+          {visibleSeries.map((item) => {
+            const points = item.values.map((entry, index) => {
+              const x = item.values.length === 1 ? paddingLeft + chartWidth / 2 : paddingLeft + (chartWidth * index) / (item.values.length - 1);
+              const value = Number(entry?.value || 0);
+              const y = paddingTop + chartHeight - (axisMax > 0 ? (value / axisMax) * chartHeight : 0);
+              return { x, y, value };
+            });
+            const peakValue = points.reduce((current, point) => Math.max(current, point.value), 0);
+            const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+            return (
+              <g key={item.key}>
+                <path d={path} className="chart-line-path" style={{ stroke: item.color }} />
+                {points.map((point, index) => {
+                  const isPeak = point.value === peakValue;
+                  if (!isPeak) {
+                    return <circle key={`${item.key}-${index}`} cx={point.x} cy={point.y} r="3.5" className="chart-line-dot" style={{ fill: item.color }} />;
+                  }
+                  return (
+                    <g key={`${item.key}-${index}`}>
+                      <circle cx={point.x} cy={point.y} r="4" className="chart-line-dot" style={{ fill: item.color }} />
+                      <text x={point.x} y={point.y - 10} textAnchor="middle" className="chart-line-value">
+                        {formatValue(point.value)}
+                      </text>
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+function PieChart({ data }) {
+  const safeData = (Array.isArray(data) ? data : []).filter((item) => Number(item?.count || 0) > 0);
+  const total = safeData.reduce((sum, item) => sum + Number(item.count || 0), 0);
+
+  if (total <= 0) {
+    return <p className="feedback">Aucune donnée sur la répartition.</p>;
+  }
+
+  let angleCursor = -Math.PI / 2;
+  const radius = 90;
+  const center = 110;
+  const slices = safeData.map((item) => {
+    const share = Number(item.count || 0) / total;
+    const nextAngle = angleCursor + share * Math.PI * 2;
+    const x1 = center + Math.cos(angleCursor) * radius;
+    const y1 = center + Math.sin(angleCursor) * radius;
+    const x2 = center + Math.cos(nextAngle) * radius;
+    const y2 = center + Math.sin(nextAngle) * radius;
+    const largeArc = nextAngle - angleCursor > Math.PI ? 1 : 0;
+    const meta = getStatusChartMeta(item.status);
+    const path = `M ${center} ${center} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+    const slice = {
+      key: item.status,
+      path,
+      color: meta.color,
+      label: meta.label,
+      count: Number(item.count || 0),
+      share
+    };
+    angleCursor = nextAngle;
+    return slice;
+  });
+
+  return (
+    <div className="pie-chart-layout">
+      <svg viewBox="0 0 220 220" className="pie-chart-svg" role="img" aria-label="Répartition des types d'utilisateur">
+        {slices.map((slice) => (
+          <path key={slice.key} d={slice.path} fill={slice.color} stroke="rgba(9, 17, 27, 0.88)" strokeWidth="2" />
+        ))}
+        <circle cx="110" cy="110" r="42" className="pie-chart-hole" />
+      </svg>
+      <div className="pie-chart-legend">
+        {slices.map((slice) => (
+          <div key={slice.key} className="pie-chart-legend-item">
+            <span className="pie-chart-legend-dot" style={{ backgroundColor: slice.color }} />
+            <span>{slice.label}</span>
+            <strong>{slice.count}</strong>
+            <span>{formatDecimalValue(slice.share * 100)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HorizontalUsageChart({ data }) {
+  const safeData = Array.isArray(data) ? data : [];
+  const maxValue = safeData.reduce((current, item) => Math.max(current, Number(item?.count || 0)), 0);
+
+  if (safeData.length === 0) {
+    return <p className="feedback">Aucune donnée sur les portes.</p>;
+  }
+
+  return (
+    <div className="usage-chart">
+      {safeData.map((item) => {
+        const count = Number(item?.count || 0);
+        const width = maxValue > 0 ? (count / maxValue) * 100 : 0;
+        return (
+          <div key={item.door_name} className="usage-chart-row">
+            <div className="usage-chart-head">
+              <strong>{item.door_name}</strong>
+              <span>{count} badges</span>
+            </div>
+            <div className="usage-chart-track">
+              <div className="usage-chart-fill" style={{ width: `${width}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNavigate }) {
+  const initialFilters = readAdminStatsFiltersFromURL();
+  const [statusFilters, setStatusFilters] = useState(initialFilters.statusFilters);
+  const [restrictWindow, setRestrictWindow] = useState(initialFilters.restrictWindow);
+  const [state, setState] = useState({ loading: true, error: "", payload: null });
+  const [disabledWeekdayKeys, setDisabledWeekdayKeys] = useState(() => new Set());
+  const requestRef = useRef(0);
+  const abortRef = useRef(null);
+
+  const activeStatuses = useMemo(() => getActiveStatusKeys(statusFilters), [statusFilters]);
+  const activeStatusKey = activeStatuses.join(",");
+
+  async function loadStats(
+    currentStatuses = activeStatuses,
+    currentRestrictWindow = restrictWindow,
+    options = {}
+  ) {
+    const { background = false } = options;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const requestId = requestRef.current + 1;
+    requestRef.current = requestId;
+    if (!background) {
+      setState((current) => ({ ...current, loading: true, error: "" }));
+    } else {
+      setState((current) => ({ ...current, error: "" }));
+    }
+    try {
+      const query = new URLSearchParams();
+      if (currentStatuses.length === 0) {
+        query.append("status", "");
+      } else {
+        currentStatuses.forEach((status) => query.append("status", status));
+      }
+      query.set("restrict_window", String(currentRestrictWindow));
+      const { response, json, text } = await requestJSON(`/api/admin/stats?${query.toString()}`, {
+        signal: controller.signal
+      });
+      if (requestId !== requestRef.current) {
+        return;
+      }
+      if (!response.ok) {
+        throw new Error((json && json.message) || text || "Unable to load statistics.");
+      }
+      setState({
+        loading: false,
+        error: "",
+        payload: json
+      });
+    } catch (loadError) {
+      if (loadError instanceof Error && loadError.name === "AbortError") {
+        return;
+      }
+      if (requestId !== requestRef.current) {
+        return;
+      }
+      setState((current) => ({
+        loading: false,
+        error: loadError instanceof Error ? loadError.message : String(loadError),
+        payload: background ? current.payload : null
+      }));
+    }
+  }
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadStats(activeStatuses, restrictWindow, {
+        background: Boolean(state.payload)
+      });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [activeStatusKey, restrictWindow]);
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const query = new URLSearchParams();
+    activeStatuses.forEach((status) => query.append("status", status));
+    query.set("restrict_window", String(restrictWindow));
+    window.history.replaceState(window.history.state, "", `/admin/stats?${query.toString()}`);
+  }, [activeStatusKey, restrictWindow]);
+
+  useEffect(() => {
+    let reloadTimer = 0;
+    const unsubscribe = subscribeToLiveUpdates((event) => {
+      if (!event?.type || (event.type !== "badge_received" && event.type !== "location_sessions_updated" && event.type !== "month_updated")) {
+        return;
+      }
+      if (reloadTimer) {
+        return;
+      }
+      reloadTimer = window.setTimeout(() => {
+        reloadTimer = 0;
+        void loadStats(activeStatuses, restrictWindow, { background: true });
+      }, 1000);
+    }, { scope: "admin" });
+    return () => {
+      if (reloadTimer) {
+        window.clearTimeout(reloadTimer);
+      }
+      unsubscribe();
+    };
+  }, [activeStatusKey, restrictWindow]);
+
+  function toggleStatusFilter(status) {
+    setStatusFilters((current) => ({
+      ...current,
+      [status]: !current[status]
+    }));
+  }
+
+  function toggleWeekdaySeries(weekdayKey) {
+    setDisabledWeekdayKeys((current) => {
+      const next = new Set(current);
+      if (next.has(weekdayKey)) {
+        next.delete(weekdayKey);
+      } else {
+        next.add(weekdayKey);
+      }
+      return next;
+    });
+  }
+
+  return (
+    <main className="app-shell">
+      <AdminHeader
+        user={user}
+        badgeDelaySeconds={badgeDelaySeconds}
+        onLogout={onLogout}
+        onToggleView={onToggleView}
+        activeSection="stats"
+        onNavigate={onNavigate}
+      />
+
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <h2>Statistiques de présence</h2>
+            <p className="panel-subtitle">Vue globale sur les 30 derniers jours, par type d’utilisateur et par plage horaire.</p>
+          </div>
+        </div>
+
+        <div className="admin-filters admin-filters-stats">
+          <div className="admin-filter-group">
+            <div className="status-tile-group" role="group" aria-label="Filtre par statut">
+              {ADMIN_STATUS_TILES.map((statusTile) => (
+                <button
+                  key={statusTile.key}
+                  type="button"
+                  className={`status-tile${statusFilters[statusTile.key] ? " status-tile-active" : ""}`}
+                  aria-pressed={statusFilters[statusTile.key]}
+                  onClick={() => toggleStatusFilter(statusTile.key)}
+                >
+                  <span className="status-tile-emoji" aria-hidden>
+                    {statusTile.emoji}
+                  </span>
+                  <span className="status-tile-label">{statusTile.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="admin-toggle-field" htmlFor="restrict-window-toggle">
+            <input
+              id="restrict-window-toggle"
+              type="checkbox"
+              checked={restrictWindow}
+              onChange={(event) => setRestrictWindow(event.target.checked)}
+            />
+            <span>
+              Limiter à {state.payload?.presence_window_start || "07:30"}-{state.payload?.presence_window_end || "20:30"}
+            </span>
+          </label>
+        </div>
+
+        {state.loading ? (
+          <StatsDashboardSkeleton />
+        ) : state.error ? (
+          <p className="feedback feedback-error">{state.error}</p>
+        ) : state.payload ? (
+          <>
+            <div className="stats-dashboard-grid">
+              <StatsCard
+                title="Présence moyenne par jour"
+                subtitle="Nombre moyen d’utilisateurs distincts vus selon le jour de semaine."
+              >
+                <VerticalBarChart data={state.payload.average_seen_by_weekday} />
+              </StatsCard>
+
+              <StatsCard
+                title="Présence moyenne par heure"
+                subtitle="Nombre moyen d'utilisateurs présents sur chaque créneau horaire, comparé sur les 7 jours."
+              >
+                <MultiWeekdayLineChart
+                  series={state.payload.average_presence_by_weekday}
+                  disabledKeys={disabledWeekdayKeys}
+                  onToggleSeries={toggleWeekdaySeries}
+                />
+              </StatsCard>
+
+              <StatsCard
+                title="Répartition des profils"
+                subtitle="Distribution des utilisateurs inclus par les filtres actuels."
+              >
+                <PieChart data={state.payload.user_type_distribution} />
+              </StatsCard>
+
+              <StatsCard
+                title="Utilisation des portes"
+                subtitle="Comparaison du volume de badges par porte."
+              >
+                <HorizontalUsageChart data={state.payload.door_usage} />
+              </StatsCard>
+            </div>
+
+            <div className="stats-summary-grid">
+              <div className="stats-summary-tile">
+                <span>Temps de présence moyen</span>
+                <strong>{formatDuration(Number(state.payload.average_daily_presence_seconds || 0), "0s")}</strong>
+                <p>Les journées sans venue sont exclues.</p>
+              </div>
+              <div className="stats-summary-tile">
+                <span>Utilisateurs filtrés</span>
+                <strong>{state.payload.filtered_user_count || 0}</strong>
+                <p>Population prise en compte pour la page.</p>
+              </div>
+              <div className="stats-summary-tile">
+                <span>Jours observés</span>
+                <strong>{state.payload.observed_day_count || 0}</strong>
+                <p>Basé sur les données actuellement stockées dans Watchdog.</p>
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="feedback">Aucune statistique disponible.</p>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function StatsDashboardSkeleton() {
+  return (
+    <>
+      <div className="stats-dashboard-grid">
+        {[0, 1, 2, 3].map((item) => (
+          <div key={item} className="stats-card stats-card-skeleton">
+            <SkeletonBlock className="skeleton-line skeleton-line-title" />
+            <SkeletonBlock className="skeleton-line skeleton-line-wide" />
+            <SkeletonBlock className="skeleton-chart-block" />
+          </div>
+        ))}
+      </div>
+      <div className="stats-summary-grid">
+        {[0, 1, 2].map((item) => (
+          <div key={item} className="stats-summary-tile">
+            <SkeletonBlock className="skeleton-line skeleton-line-title" />
+            <SkeletonBlock className="skeleton-line skeleton-line-number" />
+            <SkeletonBlock className="skeleton-line skeleton-line-wide" />
+          </div>
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -2205,7 +2888,7 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
           payload: event.day_payload
         }));
       }
-    });
+    }, { scope: dayEndpointBase.startsWith("/api/admin/") ? "admin" : "user" });
   }, [dayEndpointBase, dayKey, login]);
 
   const badgeEvents = useMemo(() => {
@@ -2367,8 +3050,8 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
       query.delete("date");
     }
     const nextURL = query.toString()
-      ? `/admin/${encodeURIComponent(login)}?${query.toString()}`
-      : `/admin/${encodeURIComponent(login)}`;
+      ? `/admin/students/${encodeURIComponent(login)}?${query.toString()}`
+      : `/admin/students/${encodeURIComponent(login)}`;
     window.history.replaceState(window.history.state, "", nextURL);
   }, [login, selectedMonthKey, selectedDayKey]);
 
@@ -2407,7 +3090,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           payload: mergeLiveDetailPayload(current.payload, event)
         }));
       }
-    });
+    }, { scope: "admin" });
   }, [login, selectedMonthKey]);
 
   function handleChangeMonth(delta) {
@@ -2487,7 +3170,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           onNavigate={onNavigate}
         />
         <div className="action-row">
-          <button className="secondary-button" type="button" onClick={() => onNavigate("/")}>
+          <button className="secondary-button" type="button" onClick={() => onNavigate("/admin/students")}>
             Retour aux étudiants
           </button>
         </div>
@@ -2679,9 +3362,12 @@ function App() {
   const [adminViewMode, setAdminViewMode] = useState("admin");
   const [badgeDelaySeconds, setBadgeDelaySeconds] = useState(null);
   const [path, setPath] = useState(() => window.location.pathname);
-  const adminUserMatch = path.match(/^\/admin\/([^/]+)$/);
+  const adminUserMatch = path.match(/^\/admin\/students\/([^/]+)$/);
   const adminUserLogin = adminUserMatch ? decodeURIComponent(adminUserMatch[1]) : "";
-  const isAdminReportsPath = path === "/reports";
+  const isAdminStudentsPath = path === "/admin/students";
+  const isAdminStatsPath = path === "/admin/stats";
+  const isAdminReportsPath = path === "/admin/reports";
+  const isAdminPath = path === "/admin" || path.startsWith("/admin/");
 
   useEffect(() => {
     function handlePopState() {
@@ -2732,8 +3418,8 @@ function App() {
       if (typeof event.badge_delay_seconds === "number") {
         setBadgeDelaySeconds(event.badge_delay_seconds);
       }
-    });
-  }, [authState.loading, authState.user]);
+    }, { scope: isAdminUser(authState.user) && adminViewMode === "admin" ? "admin" : "user" });
+  }, [adminViewMode, authState.loading, authState.user]);
 
   useEffect(() => {
     if (authState.loading) {
@@ -2745,7 +3431,7 @@ function App() {
       return;
     }
     if (authState.user && path === "/login") {
-      const nextPath = isAdminUser(authState.user) ? "/" : "/me";
+      const nextPath = isAdminUser(authState.user) ? "/admin/students" : "/me";
       window.history.replaceState({}, "", nextPath);
       setPath(nextPath);
       return;
@@ -2753,8 +3439,26 @@ function App() {
     if (authState.user && !isAdminUser(authState.user) && path !== "/me") {
       window.history.replaceState({}, "", "/me");
       setPath("/me");
+      return;
     }
-  }, [authState.loading, authState.user, path]);
+    if (authState.user && isAdminUser(authState.user) && adminViewMode === "admin" && (path === "/" || path === "/admin")) {
+      window.history.replaceState({}, "", "/admin/students");
+      setPath("/admin/students");
+      return;
+    }
+    if (authState.user && isAdminUser(authState.user) && adminViewMode === "admin") {
+      if (path === "/stats") {
+        window.history.replaceState({}, "", "/admin/stats");
+        setPath("/admin/stats");
+        return;
+      }
+      if (path === "/reports") {
+        window.history.replaceState({}, "", "/admin/reports");
+        setPath("/admin/reports");
+        return;
+      }
+    }
+  }, [adminViewMode, authState.loading, authState.user, path]);
 
   async function handleLogout() {
     try {
@@ -2768,7 +3472,15 @@ function App() {
   }
 
   function handleToggleAdminView() {
-    setAdminViewMode((current) => (current === "admin" ? "student" : "admin"));
+    setAdminViewMode((current) => {
+      const nextMode = current === "admin" ? "student" : "admin";
+      const nextPath = nextMode === "admin" ? "/admin/students" : "/me";
+      if (`${window.location.pathname}${window.location.search}` !== nextPath) {
+        window.history.pushState({}, "", nextPath);
+        setPath(window.location.pathname);
+      }
+      return nextMode;
+    });
   }
 
   function navigateTo(nextPath) {
@@ -2808,6 +3520,14 @@ function App() {
 
   const isAdmin = isAdminUser(authState.user);
 
+  if (!isAdmin && path !== "/me") {
+    return null;
+  }
+
+  if (isAdmin && adminViewMode === "admin" && (path === "/" || path === "/admin" || path === "/stats" || path === "/reports")) {
+    return null;
+  }
+
   if (isAdmin && adminViewMode === "admin") {
     if (adminUserLogin !== "") {
       return (
@@ -2834,15 +3554,33 @@ function App() {
       );
     }
 
-    return (
-      <AdminUsersIndexView
-        user={authState.user}
-        badgeDelaySeconds={badgeDelaySeconds}
-        onLogout={handleLogout}
-        onToggleView={handleToggleAdminView}
-        onNavigate={navigateTo}
-      />
-    );
+    if (isAdminStatsPath) {
+      return (
+        <AdminStatsView
+          user={authState.user}
+          badgeDelaySeconds={badgeDelaySeconds}
+          onLogout={handleLogout}
+          onToggleView={handleToggleAdminView}
+          onNavigate={navigateTo}
+        />
+      );
+    }
+
+    if (isAdminStudentsPath) {
+      return (
+        <AdminUsersIndexView
+          user={authState.user}
+          badgeDelaySeconds={badgeDelaySeconds}
+          onLogout={handleLogout}
+          onToggleView={handleToggleAdminView}
+          onNavigate={navigateTo}
+        />
+      );
+    }
+
+    if (isAdminPath || path === "/") {
+      return null;
+    }
   }
 
   return (
