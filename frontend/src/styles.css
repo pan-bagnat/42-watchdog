@@ -2006,6 +2006,18 @@ button {
   gap: 1rem;
 }
 
+.stats-dashboard-row + .stats-dashboard-row {
+  margin-top: 1rem;
+}
+
+.stats-dashboard-row-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stats-dashboard-row-two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .stats-card {
   display: flex;
   flex-direction: column;
@@ -2114,9 +2126,11 @@ button {
 }
 
 .chart-line-svg {
-  width: 100%;
-  min-width: 760px;
+  display: block;
+  width: min(100%, 760px);
+  min-width: 0;
   height: auto;
+  margin: 0 auto;
 }
 
 .chart-axis {
@@ -3276,6 +3290,8 @@ button {
   }
 
   .stats-dashboard-grid,
+  .stats-dashboard-row-three,
+  .stats-dashboard-row-two,
   .stats-summary-grid,
   .pie-chart-layout {
     grid-template-columns: 1fr;

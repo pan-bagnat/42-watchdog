@@ -142,17 +142,19 @@ type apiAdminUserDetailResponse struct {
 
 type apiAdminStatsResponse struct {
 	SelectedWeekday             int                            `json:"selected_weekday"`
-	RestrictToPresenceWindow    bool                           `json:"restrict_to_presence_window"`
 	PresenceWindowStart         string                         `json:"presence_window_start"`
 	PresenceWindowEnd           string                         `json:"presence_window_end"`
 	AverageSeenByWeekday        []watchdog.AdminStatsBucket    `json:"average_seen_by_weekday"`
 	AveragePresenceByHour       []watchdog.AdminStatsBucket    `json:"average_presence_by_hour"`
 	AveragePresenceByWeekday    []watchdog.AdminStatsSeries    `json:"average_presence_by_weekday"`
+	AveragePresenceByCategory   []watchdog.AdminStatsSeries    `json:"average_presence_by_category"`
 	UserTypeDistribution        []watchdog.AdminStatsTypeCount `json:"user_type_distribution"`
 	DoorUsage                   []watchdog.AdminStatsDoorCount `json:"door_usage"`
 	AverageDailyPresenceSeconds int64                          `json:"average_daily_presence_seconds"`
 	ObservedDayCount            int                            `json:"observed_day_count"`
 	FilteredUserCount           int                            `json:"filtered_user_count"`
+	ProcessedUserCount          int                            `json:"processed_user_count"`
+	TotalUserCount              int                            `json:"total_user_count"`
 }
 
 func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
@@ -466,17 +468,7 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 		weekday = parsed
 	}
 
-	restrictToPresenceWindow := true
-	if raw := strings.TrimSpace(r.URL.Query().Get("restrict_window")); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid_restrict_window", "restrict_window must be a boolean.")
-			return
-		}
-		restrictToPresenceWindow = parsed
-	}
-
-	stats, err := watchdog.AdminStats(statuses, weekday, restrictToPresenceWindow)
+	stats, err := watchdog.AdminStats(statuses, weekday)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "stats_load_failed", "Could not load admin statistics.")
 		return
@@ -484,17 +476,19 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, apiAdminStatsResponse{
 		SelectedWeekday:             stats.SelectedWeekday,
-		RestrictToPresenceWindow:    stats.RestrictToPresenceWindow,
 		PresenceWindowStart:         stats.PresenceWindowStart,
 		PresenceWindowEnd:           stats.PresenceWindowEnd,
 		AverageSeenByWeekday:        stats.AverageSeenByWeekday,
 		AveragePresenceByHour:       stats.AveragePresenceByHour,
 		AveragePresenceByWeekday:    stats.AveragePresenceByWeekday,
+		AveragePresenceByCategory:   stats.AveragePresenceByCategory,
 		UserTypeDistribution:        stats.UserTypeDistribution,
 		DoorUsage:                   stats.DoorUsage,
 		AverageDailyPresenceSeconds: stats.AverageDailyPresenceSeconds,
 		ObservedDayCount:            stats.ObservedDayCount,
 		FilteredUserCount:           stats.FilteredUserCount,
+		ProcessedUserCount:          stats.ProcessedUserCount,
+		TotalUserCount:              stats.TotalUserCount,
 	})
 }
 

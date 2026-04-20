@@ -428,6 +428,18 @@ function getActiveStatusKeys(statusFilters) {
     .map(([status]) => status);
 }
 
+function formatHourLabel(label) {
+  const match = String(label || "").trim().match(/^(\d{2}):\d{2}$/);
+  if (!match) {
+    return label;
+  }
+  return `${Number(match[1])}h`;
+}
+
+function isFullHourLabel(label) {
+  return /^\d{2}:00$/.test(String(label || "").trim());
+}
+
 function readAdminUserFiltersFromURL() {
   const query = new URLSearchParams(window.location.search);
   return {
@@ -440,8 +452,7 @@ function readAdminUserFiltersFromURL() {
 function readAdminStatsFiltersFromURL() {
   const query = new URLSearchParams(window.location.search);
   return {
-    statusFilters: buildStatusFilters(query.getAll("status")),
-    restrictWindow: String(query.get("restrict_window") || "").trim().toLowerCase() !== "false"
+    statusFilters: buildStatusFilters(query.getAll("status"))
   };
 }
 
@@ -2374,12 +2385,63 @@ const WEEKDAY_LINE_META = [
   { key: "dim", label: "Dimanche", shortLabel: "Dim", color: "#f78fb3" }
 ];
 
-function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatValue = (value) => formatDecimalValue(value), emptyLabel = "Aucune donnée." }) {
+function resolveWeekdayLineMeta(key, index) {
+  const fallbackMeta = WEEKDAY_LINE_META[index] || WEEKDAY_LINE_META[0];
+  return WEEKDAY_LINE_META.find((candidate) => candidate.key === key) || fallbackMeta;
+}
+
+function resolveStatusLineMeta(key) {
+  const meta = getStatusChartMeta(key);
+  return {
+    key: String(key || "").trim().toLowerCase(),
+    label: meta.label,
+    shortLabel: meta.label,
+    color: meta.color
+  };
+}
+
+function computeLineChartAxisMax(maxValue, tickCount, forcedAxisMax = null) {
+  if (Number.isFinite(forcedAxisMax) && forcedAxisMax > 0) {
+    return forcedAxisMax;
+  }
+  if (!(maxValue > 0)) {
+    return 1;
+  }
+  if (maxValue <= 1) {
+    return Math.min(1, Math.ceil(maxValue * 1.125 * 20) / 20);
+  }
+  return Math.ceil(maxValue / tickCount) * tickCount;
+}
+
+function buildSmoothLinePath(points) {
+  if (!Array.isArray(points) || points.length === 0) {
+    return "";
+  }
+  if (points.length === 1) {
+    return `M ${points[0].x} ${points[0].y}`;
+  }
+
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[index - 1] || points[index];
+    const current = points[index];
+    const next = points[index + 1];
+    const following = points[index + 2] || next;
+    const smoothing = 0.16;
+    const controlPoint1X = current.x + (next.x - previous.x) * smoothing;
+    const controlPoint1Y = current.y + (next.y - previous.y) * smoothing;
+    const controlPoint2X = next.x - (following.x - current.x) * smoothing;
+    const controlPoint2Y = next.y - (following.y - current.y) * smoothing;
+    path += ` C ${controlPoint1X} ${controlPoint1Y}, ${controlPoint2X} ${controlPoint2Y}, ${next.x} ${next.y}`;
+  }
+  return path;
+}
+
+function MultiSeriesLineChart({ series, disabledKeys, onToggleSeries, resolveMeta, legendLabel = "Séries affichées", legendText = (item) => item.label, formatLabel = (label) => label, formatValue = (value) => formatDecimalValue(value), emptyLabel = "Aucune donnée.", ariaLabel = "Graphique de présence moyenne", axisMax: forcedAxisMax = null }) {
   const safeSeries = (Array.isArray(series) ? series : [])
     .map((item, index) => {
-      const fallbackMeta = WEEKDAY_LINE_META[index] || WEEKDAY_LINE_META[0];
-      const key = String(item?.key || fallbackMeta.key || "").trim().toLowerCase();
-      const meta = WEEKDAY_LINE_META.find((candidate) => candidate.key === key) || fallbackMeta;
+      const key = String(item?.key || "").trim().toLowerCase();
+      const meta = resolveMeta(key, index);
       const values = Array.isArray(item?.values) ? item.values : [];
       return {
         key: meta.key,
@@ -2391,7 +2453,8 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
     })
     .filter((item) => item.values.length > 0);
   const visibleSeries = safeSeries.filter((item) => !disabledKeys.has(item.key));
-  const xLabels = safeSeries[0]?.values?.map((item) => item?.label || "") || [];
+  const rawLabels = safeSeries[0]?.values?.map((item) => item?.label || "") || [];
+  const xLabels = rawLabels.map((label) => (isFullHourLabel(label) ? formatLabel(label) : ""));
   const allValues = visibleSeries.flatMap((item) => item.values.map((entry) => Number(entry?.value || 0)));
   const maxValue = allValues.reduce((current, value) => Math.max(current, value), 0);
 
@@ -2408,7 +2471,7 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
   const chartWidth = width - paddingLeft - paddingRight;
   const chartHeight = height - paddingTop - paddingBottom;
   const tickCount = 5;
-  const axisMax = maxValue > 0 ? Math.ceil(maxValue / tickCount) * tickCount : 1;
+  const axisMax = computeLineChartAxisMax(maxValue, tickCount, forcedAxisMax);
   const yTicks = Array.from({ length: tickCount + 1 }, (_, index) => {
     const value = (axisMax / tickCount) * index;
     const y = paddingTop + chartHeight - (value / axisMax) * chartHeight;
@@ -2417,7 +2480,7 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
 
   return (
     <div className="chart-multi-line-panel">
-      <div className="chart-multi-line-legend" role="group" aria-label="Jours affichés">
+      <div className="chart-multi-line-legend" role="group" aria-label={legendLabel}>
         {safeSeries.map((item) => {
           const disabled = disabledKeys.has(item.key);
           return (
@@ -2429,13 +2492,13 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
               aria-pressed={!disabled}
             >
               <span className="chart-multi-line-legend-swatch" style={{ backgroundColor: item.color }} />
-              <span>{item.label}</span>
+              <span>{legendText(item)}</span>
             </button>
           );
         })}
       </div>
       <div className="chart-line-shell">
-        <svg viewBox={`0 0 ${width} ${height}`} className="chart-line-svg" role="img" aria-label="Graphique de présence moyenne par heure et par jour">
+        <svg viewBox={`0 0 ${width} ${height}`} className="chart-line-svg" role="img" aria-label={ariaLabel}>
           {yTicks.map((tick) => (
             <g key={tick.value}>
               <line x1={paddingLeft} y1={tick.y} x2={width - paddingRight} y2={tick.y} className="chart-grid-line" />
@@ -2449,7 +2512,7 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
           {xLabels.map((label, index) => {
             const x = xLabels.length === 1 ? paddingLeft + chartWidth / 2 : paddingLeft + (chartWidth * index) / (xLabels.length - 1);
             return (
-              <text key={label} x={x} y={height - 16} textAnchor="middle" className="chart-line-label">
+              <text key={`${rawLabels[index]}-${index}`} x={x} y={height - 16} textAnchor="middle" className="chart-line-label">
                 {label}
               </text>
             );
@@ -2459,24 +2522,21 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
               const x = item.values.length === 1 ? paddingLeft + chartWidth / 2 : paddingLeft + (chartWidth * index) / (item.values.length - 1);
               const value = Number(entry?.value || 0);
               const y = paddingTop + chartHeight - (axisMax > 0 ? (value / axisMax) * chartHeight : 0);
-              return { x, y, value };
+              return { x, y, value, label: String(entry?.label || "") };
             });
-            const peakValue = points.reduce((current, point) => Math.max(current, point.value), 0);
-            const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+            const path = buildSmoothLinePath(points);
             return (
               <g key={item.key}>
                 <path d={path} className="chart-line-path" style={{ stroke: item.color }} />
                 {points.map((point, index) => {
-                  const isPeak = point.value === peakValue;
-                  if (!isPeak) {
-                    return <circle key={`${item.key}-${index}`} cx={point.x} cy={point.y} r="3.5" className="chart-line-dot" style={{ fill: item.color }} />;
+                  if (!isFullHourLabel(point.label)) {
+                    return null;
                   }
                   return (
                     <g key={`${item.key}-${index}`}>
-                      <circle cx={point.x} cy={point.y} r="4" className="chart-line-dot" style={{ fill: item.color }} />
-                      <text x={point.x} y={point.y - 10} textAnchor="middle" className="chart-line-value">
-                        {formatValue(point.value)}
-                      </text>
+                      <circle cx={point.x} cy={point.y} r="4" className="chart-line-dot" style={{ fill: item.color }}>
+                        <title>{`${item.label} • ${formatHourLabel(point.label)} • ${formatValue(point.value)}`}</title>
+                      </circle>
                     </g>
                   );
                 })}
@@ -2486,6 +2546,31 @@ function MultiWeekdayLineChart({ series, disabledKeys, onToggleSeries, formatVal
         </svg>
       </div>
     </div>
+  );
+}
+
+function MultiWeekdayLineChart(props) {
+  return (
+    <MultiSeriesLineChart
+      {...props}
+      resolveMeta={resolveWeekdayLineMeta}
+      legendLabel="Jours affichés"
+      legendText={(item) => item.shortLabel}
+      formatLabel={formatHourLabel}
+      ariaLabel="Graphique de présence moyenne par heure et par jour"
+    />
+  );
+}
+
+function MultiStatusLineChart(props) {
+  return (
+    <MultiSeriesLineChart
+      {...props}
+      resolveMeta={resolveStatusLineMeta}
+      legendLabel="Catégories affichées"
+      formatLabel={formatHourLabel}
+      ariaLabel="Graphique de présence moyenne par heure et par catégorie"
+    />
   );
 }
 
@@ -2576,20 +2661,16 @@ function HorizontalUsageChart({ data }) {
 function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNavigate }) {
   const initialFilters = readAdminStatsFiltersFromURL();
   const [statusFilters, setStatusFilters] = useState(initialFilters.statusFilters);
-  const [restrictWindow, setRestrictWindow] = useState(initialFilters.restrictWindow);
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [disabledWeekdayKeys, setDisabledWeekdayKeys] = useState(() => new Set());
+  const [disabledCategoryKeys, setDisabledCategoryKeys] = useState(() => new Set());
   const requestRef = useRef(0);
   const abortRef = useRef(null);
 
   const activeStatuses = useMemo(() => getActiveStatusKeys(statusFilters), [statusFilters]);
   const activeStatusKey = activeStatuses.join(",");
 
-  async function loadStats(
-    currentStatuses = activeStatuses,
-    currentRestrictWindow = restrictWindow,
-    options = {}
-  ) {
+  async function loadStats(currentStatuses = activeStatuses, options = {}) {
     const { background = false } = options;
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -2608,7 +2689,6 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
       } else {
         currentStatuses.forEach((status) => query.append("status", status));
       }
-      query.set("restrict_window", String(currentRestrictWindow));
       const { response, json, text } = await requestJSON(`/api/admin/stats?${query.toString()}`, {
         signal: controller.signal
       });
@@ -2640,12 +2720,12 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void loadStats(activeStatuses, restrictWindow, {
+      void loadStats(activeStatuses, {
         background: Boolean(state.payload)
       });
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [activeStatusKey, restrictWindow]);
+  }, [activeStatusKey]);
 
   useEffect(() => {
     return () => {
@@ -2656,9 +2736,8 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
   useEffect(() => {
     const query = new URLSearchParams();
     activeStatuses.forEach((status) => query.append("status", status));
-    query.set("restrict_window", String(restrictWindow));
     window.history.replaceState(window.history.state, "", `/admin/stats?${query.toString()}`);
-  }, [activeStatusKey, restrictWindow]);
+  }, [activeStatusKey]);
 
   useEffect(() => {
     let reloadTimer = 0;
@@ -2671,7 +2750,7 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
       }
       reloadTimer = window.setTimeout(() => {
         reloadTimer = 0;
-        void loadStats(activeStatuses, restrictWindow, { background: true });
+        void loadStats(activeStatuses, { background: true });
       }, 1000);
     }, { scope: "admin" });
     return () => {
@@ -2680,7 +2759,7 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
       }
       unsubscribe();
     };
-  }, [activeStatusKey, restrictWindow]);
+  }, [activeStatusKey]);
 
   function toggleStatusFilter(status) {
     setStatusFilters((current) => ({
@@ -2696,6 +2775,18 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
         next.delete(weekdayKey);
       } else {
         next.add(weekdayKey);
+      }
+      return next;
+    });
+  }
+
+  function toggleCategorySeries(categoryKey) {
+    setDisabledCategoryKeys((current) => {
+      const next = new Set(current);
+      if (next.has(categoryKey)) {
+        next.delete(categoryKey);
+      } else {
+        next.add(categoryKey);
       }
       return next;
     });
@@ -2740,17 +2831,6 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
             </div>
           </div>
 
-          <label className="admin-toggle-field" htmlFor="restrict-window-toggle">
-            <input
-              id="restrict-window-toggle"
-              type="checkbox"
-              checked={restrictWindow}
-              onChange={(event) => setRestrictWindow(event.target.checked)}
-            />
-            <span>
-              Limiter à {state.payload?.presence_window_start || "07:30"}-{state.payload?.presence_window_end || "20:30"}
-            </span>
-          </label>
         </div>
 
         {state.loading ? (
@@ -2759,12 +2839,40 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
           <p className="feedback feedback-error">{state.error}</p>
         ) : state.payload ? (
           <>
-            <div className="stats-dashboard-grid">
+            <div className="stats-dashboard-grid stats-dashboard-row stats-dashboard-row-three">
+              <StatsCard
+                title="Répartition des profils"
+                subtitle="Distribution des utilisateurs inclus par les filtres actuels."
+              >
+                <PieChart data={state.payload.user_type_distribution} />
+              </StatsCard>
+
               <StatsCard
                 title="Présence moyenne par jour"
                 subtitle="Nombre moyen d’utilisateurs distincts vus selon le jour de semaine."
               >
                 <VerticalBarChart data={state.payload.average_seen_by_weekday} />
+              </StatsCard>
+
+              <StatsCard
+                title="Utilisation des portes"
+                subtitle="Comparaison du volume de badges par porte."
+              >
+                <HorizontalUsageChart data={state.payload.door_usage} />
+              </StatsCard>
+            </div>
+
+            <div className="stats-dashboard-grid stats-dashboard-row stats-dashboard-row-two">
+              <StatsCard
+                title="Présence moyenne par catégorie"
+                subtitle="Taux moyen de présence sur chaque créneau horaire, moyenné du lundi au vendredi par type d’utilisateur."
+              >
+                <MultiStatusLineChart
+                  series={state.payload.average_presence_by_category}
+                  disabledKeys={disabledCategoryKeys}
+                  onToggleSeries={toggleCategorySeries}
+                  formatValue={(value) => formatDecimalValue(value, 2)}
+                />
               </StatsCard>
 
               <StatsCard
@@ -2777,20 +2885,6 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
                   onToggleSeries={toggleWeekdaySeries}
                 />
               </StatsCard>
-
-              <StatsCard
-                title="Répartition des profils"
-                subtitle="Distribution des utilisateurs inclus par les filtres actuels."
-              >
-                <PieChart data={state.payload.user_type_distribution} />
-              </StatsCard>
-
-              <StatsCard
-                title="Utilisation des portes"
-                subtitle="Comparaison du volume de badges par porte."
-              >
-                <HorizontalUsageChart data={state.payload.door_usage} />
-              </StatsCard>
             </div>
 
             <div className="stats-summary-grid">
@@ -2801,7 +2895,7 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
               </div>
               <div className="stats-summary-tile">
                 <span>Utilisateurs filtrés</span>
-                <strong>{state.payload.filtered_user_count || 0}</strong>
+                <strong>{`${state.payload.processed_user_count || 0}/${state.payload.total_user_count || 0}`}</strong>
                 <p>Population prise en compte pour la page.</p>
               </div>
               <div className="stats-summary-tile">
