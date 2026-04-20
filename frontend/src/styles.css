@@ -1023,6 +1023,57 @@ button {
   font-size: 1.6rem;
 }
 
+.user-list-main .user-login-text,
+.user-detail-meta .user-login-text {
+  display: inline-block;
+  color: #ffffff;
+  -webkit-text-fill-color: #ffffff;
+}
+
+.contributor-login-text {
+  background-image: linear-gradient(
+    90deg,
+    #ff6b6b 0%,
+    #ffb86b 7.14%,
+    #ffe66d 14.28%,
+    #6bff95 21.42%,
+    #5ed6ff 28.56%,
+    #7b8cff 35.7%,
+    #ff78d1 42.84%,
+    #ff6b6b 50%,
+    #ffb86b 57.14%,
+    #ffe66d 64.28%,
+    #6bff95 71.42%,
+    #5ed6ff 78.56%,
+    #7b8cff 85.7%,
+    #ff78d1 92.84%,
+    #ff6b6b 100%
+  );
+  background-size: 200% 100%;
+  background-position: 0% 50%;
+  background-repeat: repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: contributor-rainbow-shift 3.6s linear infinite;
+}
+
+@keyframes contributor-rainbow-shift {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: -100% 50%;
+  }
+}
+
+.user-list-main .user-login-text.contributor-login-text,
+.user-detail-meta .user-login-text.contributor-login-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
 .user-state-badges {
   display: inline-flex;
   gap: 0.4rem;
@@ -1323,6 +1374,161 @@ button {
   min-width: 10rem;
   max-width: 14rem;
   margin-bottom: 0;
+}
+
+.contributor-crown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 0.38rem;
+  color: #f4c76a;
+  font-size: 0.92rem;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.contributor-crown-inline {
+  font-size: 1rem;
+}
+
+.contributor-action-shell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.contributor-action-shell-inline .contributor-action-button {
+  margin-left: 0.58rem;
+}
+
+.contributor-action-button {
+  --crown-top: #f4c76a;
+  --crown-base: #e0b75f;
+  --crown-outline: rgba(244, 199, 106, 0.82);
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.76rem;
+  height: 1.76rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  transition: transform 100ms ease;
+  animation: contributor-dislike-effect 300ms ease;
+}
+
+.contributor-action-button:hover:not(:disabled) {
+  transform: scale(1.08);
+}
+
+.contributor-action-button-active {
+  animation: contributor-like-effect 300ms ease;
+}
+
+.contributor-action-button-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: block;
+  overflow: visible;
+}
+
+.contributor-action-button-top,
+.contributor-action-button-base {
+  transition: fill 140ms ease, stroke 140ms ease, stroke-width 140ms ease;
+}
+
+.contributor-action-button-top {
+  fill: var(--crown-top);
+  stroke: none;
+}
+
+.contributor-action-button-base {
+  fill: var(--crown-base);
+  stroke: none;
+}
+
+.contributor-action-button:not(.contributor-action-button-active) .contributor-action-button-top,
+.contributor-action-button:not(.contributor-action-button-active) .contributor-action-button-base {
+  fill: none !important;
+  stroke: var(--crown-outline) !important;
+  stroke-width: 2.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.contributor-action-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.contributor-confetti-burst {
+  position: absolute;
+  left: calc(50% + var(--confetti-origin-x, 0px));
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.contributor-confetti-piece {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0.34rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--confetti-color);
+  opacity: 0;
+  transform: translate(-50%, -50%) rotate(0deg) scale(0.6);
+  animation: contributor-confetti-burst 820ms ease-out forwards;
+  animation-delay: var(--confetti-delay);
+}
+
+@keyframes contributor-like-effect {
+  0% {
+    transform: scale(0.72);
+  }
+
+  55% {
+    transform: scale(1.14);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes contributor-confetti-burst {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) rotate(0deg) scale(0.4);
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--confetti-x)), calc(-50% + var(--confetti-y))) rotate(var(--confetti-rotation)) scale(1);
+  }
+}
+
+@keyframes contributor-dislike-effect {
+  0% {
+    transform: scale(0.72);
+  }
+
+  55% {
+    transform: scale(1.08);
+  }
+
+  100% {
+    transform: scale(1);
+  }
 }
 
 .admin-status-trigger {

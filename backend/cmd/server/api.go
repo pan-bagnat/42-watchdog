@@ -20,6 +20,7 @@ type apiUserState struct {
 	Status42                string              `json:"status_42"`
 	StatusOverridden        bool                `json:"status_overridden"`
 	IsBlacklisted           bool                `json:"is_blacklisted"`
+	IsContributor           bool                `json:"is_contributor"`
 	BadgePostingOff         bool                `json:"badge_posting_off"`
 	BlacklistReason         string              `json:"blacklist_reason,omitempty"`
 	Profile                 string              `json:"profile"`
@@ -78,6 +79,7 @@ type apiStudentUpdateRequest struct {
 	Status           *string `json:"status,omitempty"`
 	StatusOverridden *bool   `json:"status_overridden,omitempty"`
 	IsBlacklisted    *bool   `json:"is_blacklisted,omitempty"`
+	IsContributor    *bool   `json:"is_contributor,omitempty"`
 	BlacklistReason  *string `json:"blacklist_reason,omitempty"`
 }
 
@@ -125,6 +127,7 @@ type apiAdminUserListItem struct {
 	Status42                    string     `json:"status_42"`
 	StatusOverridden            bool       `json:"status_overridden"`
 	IsBlacklisted               bool       `json:"is_blacklisted"`
+	IsContributor               bool       `json:"is_contributor"`
 	BadgePostingOff             bool       `json:"badge_posting_off"`
 	BlacklistReason             string     `json:"blacklist_reason,omitempty"`
 	LastBadgeAt                 *time.Time `json:"last_badge_at,omitempty"`
@@ -193,6 +196,7 @@ func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
 				Status42:         "student",
 				StatusOverridden: false,
 				IsBlacklisted:    false,
+				IsContributor:    false,
 				BadgePostingOff:  false,
 			},
 			Days: make([]apiAdminStudentDay, 0, len(days)),
@@ -212,6 +216,7 @@ func studentDetailHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			payload.StatusOverridden = settings.StatusOverridden
 			payload.IsBlacklisted = settings.IsBlacklisted
+			payload.IsContributor = settings.IsContributor
 			payload.BadgePostingOff = settings.BadgePostingOff
 			payload.BlacklistReason = settings.BlacklistReason
 		}
@@ -359,13 +364,14 @@ func adminUserDetailHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.BlacklistReason == nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted or blacklist_reason.")
+		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.IsContributor == nil && req.BlacklistReason == nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted, is_contributor or blacklist_reason.")
 			return
 		}
 
 		if _, err := watchdog.UpdateUserSettings(login, watchdog.UserSettingsPatch{
 			IsBlacklisted:    req.IsBlacklisted,
+			IsContributor:    req.IsContributor,
 			BlacklistReason:  req.BlacklistReason,
 			Status:           req.Status,
 			StatusOverridden: req.StatusOverridden,
@@ -702,12 +708,13 @@ func adminStudentHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.BlacklistReason == nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted or blacklist_reason.")
+		if req.Status == nil && req.StatusOverridden == nil && req.IsBlacklisted == nil && req.IsContributor == nil && req.BlacklistReason == nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_patch", "Provide status, status_overridden, is_blacklisted, is_contributor or blacklist_reason.")
 			return
 		}
 		if _, err := watchdog.UpdateUserSettings(login, watchdog.UserSettingsPatch{
 			IsBlacklisted:    req.IsBlacklisted,
+			IsContributor:    req.IsContributor,
 			BlacklistReason:  req.BlacklistReason,
 			Status:           req.Status,
 			StatusOverridden: req.StatusOverridden,
@@ -966,6 +973,7 @@ func mapUserWithDuration(user watchdog.User, retainedDuration time.Duration) *ap
 		Status42:                detectedStatus,
 		StatusOverridden:        user.StatusOverridden,
 		IsBlacklisted:           user.IsBlacklisted,
+		IsContributor:           user.IsContributor,
 		BadgePostingOff:         user.BadgePostingOff,
 		BlacklistReason:         user.BlacklistReason,
 		Profile:                 profileToString(user.Profile),
@@ -1022,6 +1030,7 @@ func liveFallbackUserByLogin(login string, badgeEvents []watchdog.BadgeEvent, lo
 		user.Status42 = summary.Status42
 		user.StatusOverridden = summary.StatusOverridden
 		user.IsBlacklisted = summary.IsBlacklisted
+		user.IsContributor = summary.IsContributor
 		user.BadgePostingOff = summary.BadgePostingOff
 		user.BlacklistReason = summary.BlacklistReason
 	}
@@ -1145,6 +1154,7 @@ func mapAdminUser(user watchdog.AdminUserSummary) apiAdminUserListItem {
 		Status42:                    detectedStatus,
 		StatusOverridden:            user.StatusOverridden,
 		IsBlacklisted:               user.IsBlacklisted,
+		IsContributor:               user.IsContributor,
 		BadgePostingOff:             user.BadgePostingOff,
 		BlacklistReason:             user.BlacklistReason,
 		LastBadgeAt:                 timePtr(user.LastBadgeAt),

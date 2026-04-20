@@ -30,6 +30,7 @@ type User struct {
 	ID42              string        `json:"id_42"`
 	IsApprentice      bool          `json:"is_apprentice"`
 	IsBlacklisted     bool          `json:"is_blacklisted"`
+	IsContributor     bool          `json:"is_contributor"`
 	BadgePostingOff   bool          `json:"badge_posting_off"`
 	BlacklistReason   string        `json:"blacklist_reason"`
 	Status            string        `json:"status"`

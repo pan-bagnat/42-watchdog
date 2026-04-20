@@ -77,6 +77,9 @@ func (hub *wsHub) broadcast(payload wsMessage) {
 }
 
 func shouldDeliverWSMessage(client wsClient, payload wsMessage) bool {
+	if payload.Type == "badge_delay_updated" {
+		return true
+	}
 	if client.IsAdmin {
 		return true
 	}
@@ -107,6 +110,10 @@ func initLiveUpdates() {
 		}
 		enrichLiveUpdateMessage(&message, event.Login, todayDayKey())
 		liveUpdatesHub.broadcast(message)
+		liveUpdatesHub.broadcast(wsMessage{
+			Type:              "badge_delay_updated",
+			BadgeDelaySeconds: event.BadgeDelaySeconds,
+		})
 	})
 	watchdog.RegisterLocationSessionsUpdateListener(func(event watchdog.LocationSessionsUpdateEvent) {
 		message := wsMessage{
@@ -322,6 +329,7 @@ func buildLiveUpdateMonthPayload(login, monthKey string) (apiAdminUserDetailResp
 			Status42:         "student",
 			StatusOverridden: false,
 			IsBlacklisted:    false,
+			IsContributor:    false,
 			BadgePostingOff:  false,
 		},
 		Days: make([]apiAdminStudentDay, 0, len(days)),
@@ -339,6 +347,7 @@ func buildLiveUpdateMonthPayload(login, monthKey string) (apiAdminUserDetailResp
 			}
 			payload.StatusOverridden = settings.StatusOverridden
 			payload.IsBlacklisted = settings.IsBlacklisted
+			payload.IsContributor = settings.IsContributor
 			payload.BadgePostingOff = settings.BadgePostingOff
 			payload.BlacklistReason = settings.BlacklistReason
 		}

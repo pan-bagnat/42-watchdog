@@ -75,6 +75,7 @@ type AdminUserSummary struct {
 	Status42         string        `json:"status_42"`
 	StatusOverridden bool          `json:"status_overridden"`
 	IsBlacklisted    bool          `json:"is_blacklisted"`
+	IsContributor    bool          `json:"is_contributor"`
 	BadgePostingOff  bool          `json:"badge_posting_off"`
 	BlacklistReason  string        `json:"blacklist_reason"`
 	LastBadgeAt      time.Time     `json:"last_badge_at"`
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS watchdog_users (
 	status_42 TEXT NOT NULL DEFAULT 'student',
 	status_overridden INTEGER NOT NULL DEFAULT 0,
 	is_blacklisted INTEGER NOT NULL DEFAULT 0,
+	is_contributor INTEGER NOT NULL DEFAULT 0,
 	badge_posting_off INTEGER NOT NULL DEFAULT 0,
 	blacklist_reason TEXT NOT NULL DEFAULT '',
 	photo_url TEXT NOT NULL DEFAULT '',
@@ -447,6 +449,7 @@ func migrateUsersTable() error {
 		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'student'`,
 		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status_42 TEXT NOT NULL DEFAULT 'student'`,
 		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS status_overridden INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE watchdog_users ADD COLUMN IF NOT EXISTS is_contributor INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, statement := range alterStatements {
 		if _, err := storageExec(statement); err != nil {
@@ -1127,6 +1130,7 @@ type UserSettings struct {
 	Status42         string `json:"status_42"`
 	StatusOverridden bool   `json:"status_overridden"`
 	IsBlacklisted    bool   `json:"is_blacklisted"`
+	IsContributor    bool   `json:"is_contributor"`
 	BadgePostingOff  bool   `json:"badge_posting_off"`
 	BlacklistReason  string `json:"blacklist_reason,omitempty"`
 }
@@ -1141,14 +1145,15 @@ func loadUserSettings(login string) (UserSettings, bool, error) {
 		settings         UserSettings
 		statusOverridden int
 		isBlacklisted    int
+		isContributor    int
 		badgePostingOff  int
 	)
 
 	err := storageQueryRow(`
-		SELECT login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason
+		SELECT login_42, status, status_42, status_overridden, is_blacklisted, is_contributor, badge_posting_off, blacklist_reason
 		FROM watchdog_users
 		WHERE login_42 = ?
-	`, login).Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &settings.BlacklistReason)
+	`, login).Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &isContributor, &badgePostingOff, &settings.BlacklistReason)
 	if err == sql.ErrNoRows {
 		return UserSettings{}, false, nil
 	}
@@ -1160,6 +1165,7 @@ func loadUserSettings(login string) (UserSettings, bool, error) {
 	settings.Status42 = normalizeManagedUserStatus(settings.Status42)
 	settings.StatusOverridden = statusOverridden == 1
 	settings.IsBlacklisted = isBlacklisted == 1
+	settings.IsContributor = isContributor == 1
 	settings.BadgePostingOff = badgePostingOff == 1
 	settings.BlacklistReason = strings.TrimSpace(settings.BlacklistReason)
 	return settings, true, nil
@@ -1195,7 +1201,7 @@ func loadUserSettingsMap(logins []string) (map[string]UserSettings, error) {
 	}
 
 	rows, err := storageQuery(fmt.Sprintf(`
-		SELECT login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason
+		SELECT login_42, status, status_42, status_overridden, is_blacklisted, is_contributor, badge_posting_off, blacklist_reason
 		FROM watchdog_users
 		WHERE login_42 IN (%s)
 	`, strings.Join(placeholders, ",")), args...)
@@ -1210,15 +1216,17 @@ func loadUserSettingsMap(logins []string) (map[string]UserSettings, error) {
 			settings         UserSettings
 			statusOverridden int
 			isBlacklisted    int
+			isContributor    int
 			badgePostingOff  int
 		)
-		if err := rows.Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &settings.BlacklistReason); err != nil {
+		if err := rows.Scan(&settings.Login42, &settings.Status, &settings.Status42, &statusOverridden, &isBlacklisted, &isContributor, &badgePostingOff, &settings.BlacklistReason); err != nil {
 			return nil, err
 		}
 		settings.Status = normalizeManagedUserStatus(settings.Status)
 		settings.Status42 = normalizeManagedUserStatus(settings.Status42)
 		settings.StatusOverridden = statusOverridden == 1
 		settings.IsBlacklisted = isBlacklisted == 1
+		settings.IsContributor = isContributor == 1
 		settings.BadgePostingOff = badgePostingOff == 1
 		settings.BlacklistReason = strings.TrimSpace(settings.BlacklistReason)
 		settingsByLogin[normalizeLogin(settings.Login42)] = settings
@@ -1239,13 +1247,14 @@ func saveUserSettings(settings UserSettings) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := storageExec(`
 		INSERT INTO watchdog_users (
-			login_42, status, status_42, status_overridden, is_blacklisted, badge_posting_off, blacklist_reason, updated_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			login_42, status, status_42, status_overridden, is_blacklisted, is_contributor, badge_posting_off, blacklist_reason, updated_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(login_42) DO UPDATE SET
 			status = excluded.status,
 			status_42 = excluded.status_42,
 			status_overridden = excluded.status_overridden,
 			is_blacklisted = excluded.is_blacklisted,
+			is_contributor = excluded.is_contributor,
 			badge_posting_off = excluded.badge_posting_off,
 			blacklist_reason = excluded.blacklist_reason,
 			updated_at = excluded.updated_at
@@ -1255,6 +1264,7 @@ func saveUserSettings(settings UserSettings) error {
 		coalesceManagedStatus(settings.Status42, settings.Status),
 		boolToInt(settings.StatusOverridden),
 		boolToInt(settings.IsBlacklisted),
+		boolToInt(settings.IsContributor),
 		boolToInt(settings.BadgePostingOff),
 		strings.TrimSpace(settings.BlacklistReason),
 		now,
@@ -1279,6 +1289,7 @@ func applyUserSettings(user *User, settings UserSettings) {
 		}
 	}
 	user.IsBlacklisted = settings.IsBlacklisted
+	user.IsContributor = settings.IsContributor
 	user.BadgePostingOff = settings.BadgePostingOff
 	user.BlacklistReason = settings.BlacklistReason
 }
@@ -2506,6 +2517,7 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 			COALESCE(summaries.last_access, summaries.first_access),
 			summaries.retained_duration_seconds,
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_daily_student_summaries AS summaries
@@ -2527,8 +2539,9 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 		var lastBadgeAt sql.NullString
 		var durationSeconds int64
 		var isBlacklisted int
+		var isContributor int
 		var badgePostingOff int
-		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason); err != nil {
 			return nil, err
 		}
 		user.IsApprentice = isApprentice == 1
@@ -2537,6 +2550,7 @@ func loadLatestHistoricalAdminUsers() ([]AdminUserSummary, error) {
 		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 		user.StatusOverridden = statusOverridden == 1
 		user.IsBlacklisted = isBlacklisted == 1
+		user.IsContributor = isContributor == 1
 		user.BadgePostingOff = badgePostingOff == 1
 		user.DayDuration = time.Duration(durationSeconds) * time.Second
 		if lastBadgeAt.Valid {
@@ -2563,6 +2577,7 @@ func loadLatestHistoricalAdminUserByLogin(login string) (AdminUserSummary, bool,
 	var lastBadgeAt sql.NullString
 	var durationSeconds int64
 	var isBlacklisted int
+	var isContributor int
 	var badgePostingOff int
 
 	err := storageQueryRow(`
@@ -2576,6 +2591,7 @@ func loadLatestHistoricalAdminUserByLogin(login string) (AdminUserSummary, bool,
 			COALESCE(summaries.last_access, summaries.first_access),
 			summaries.retained_duration_seconds,
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_daily_student_summaries AS summaries
@@ -2584,7 +2600,7 @@ func loadLatestHistoricalAdminUserByLogin(login string) (AdminUserSummary, bool,
 		WHERE summaries.login_42 = ?
 		ORDER BY COALESCE(summaries.last_access, summaries.first_access) DESC NULLS LAST, summaries.day_key DESC
 		LIMIT 1
-	`, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	`, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &lastBadgeAt, &durationSeconds, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason)
 	if err == sql.ErrNoRows {
 		return AdminUserSummary{}, false, nil
 	}
@@ -2598,6 +2614,7 @@ func loadLatestHistoricalAdminUserByLogin(login string) (AdminUserSummary, bool,
 	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 	user.StatusOverridden = statusOverridden == 1
 	user.IsBlacklisted = isBlacklisted == 1
+	user.IsContributor = isContributor == 1
 	user.BadgePostingOff = badgePostingOff == 1
 	user.DayDuration = time.Duration(durationSeconds) * time.Second
 	if lastBadgeAt.Valid {
@@ -2629,6 +2646,7 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 			COALESCE(current_users.last_access, current_users.first_access),
 			current_users.duration_seconds,
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_current_users AS current_users
@@ -2652,8 +2670,9 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 		var lastBadgeAt sql.NullString
 		var durationSeconds int64
 		var isBlacklisted int
+		var isContributor int
 		var badgePostingOff int
-		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason); err != nil {
 			return nil, err
 		}
 		user.IsApprentice = isApprentice == 1
@@ -2662,6 +2681,7 @@ func loadCurrentAdminUsers() ([]AdminUserSummary, error) {
 		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 		user.StatusOverridden = statusOverridden == 1
 		user.IsBlacklisted = isBlacklisted == 1
+		user.IsContributor = isContributor == 1
 		user.BadgePostingOff = badgePostingOff == 1
 		storedDuration := time.Duration(durationSeconds) * time.Second
 		user.DayDuration = storedDuration
@@ -2716,6 +2736,7 @@ func loadCurrentAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
 	var lastBadgeAt sql.NullString
 	var durationSeconds int64
 	var isBlacklisted int
+	var isContributor int
 	var badgePostingOff int
 
 	err := storageQueryRow(`
@@ -2730,6 +2751,7 @@ func loadCurrentAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
 			COALESCE(current_users.last_access, current_users.first_access),
 			current_users.duration_seconds,
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_current_users AS current_users
@@ -2740,7 +2762,7 @@ func loadCurrentAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
 			AND COALESCE(current_users.last_access, current_users.first_access) IS NOT NULL
 		ORDER BY COALESCE(current_users.last_access, current_users.first_access) DESC NULLS LAST, current_users.updated_at DESC
 		LIMIT 1
-	`, dayKey, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	`, dayKey, login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &firstAccess, &lastBadgeAt, &durationSeconds, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason)
 	if err == sql.ErrNoRows {
 		return AdminUserSummary{}, false, nil
 	}
@@ -2754,6 +2776,7 @@ func loadCurrentAdminUserByLogin(login string) (AdminUserSummary, bool, error) {
 	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 	user.StatusOverridden = statusOverridden == 1
 	user.IsBlacklisted = isBlacklisted == 1
+	user.IsContributor = isContributor == 1
 	user.BadgePostingOff = badgePostingOff == 1
 	user.DayDuration = time.Duration(durationSeconds) * time.Second
 
@@ -2805,6 +2828,7 @@ func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
 			COALESCE(users.status_42, ''),
 			COALESCE(users.status_overridden, 0),
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_day_profiles AS profiles
@@ -2824,8 +2848,9 @@ func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
 		var profile int
 		var statusOverridden int
 		var isBlacklisted int
+		var isContributor int
 		var badgePostingOff int
-		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &user.BlacklistReason); err != nil {
+		if err := rows.Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason); err != nil {
 			return nil, err
 		}
 		user.IsApprentice = isApprentice == 1
@@ -2834,6 +2859,7 @@ func loadCurrentAdminDayProfiles() ([]AdminUserSummary, error) {
 		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 		user.StatusOverridden = statusOverridden == 1
 		user.IsBlacklisted = isBlacklisted == 1
+		user.IsContributor = isContributor == 1
 		user.BadgePostingOff = badgePostingOff == 1
 		users = append(users, user)
 	}
@@ -2851,6 +2877,7 @@ func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, er
 	var profile int
 	var statusOverridden int
 	var isBlacklisted int
+	var isContributor int
 	var badgePostingOff int
 
 	err := storageQueryRow(`
@@ -2862,6 +2889,7 @@ func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, er
 			COALESCE(users.status_42, ''),
 			COALESCE(users.status_overridden, 0),
 			COALESCE(users.is_blacklisted, 0),
+			COALESCE(users.is_contributor, 0),
 			COALESCE(users.badge_posting_off, 0),
 			COALESCE(users.blacklist_reason, '')
 		FROM watchdog_day_profiles AS profiles
@@ -2869,7 +2897,7 @@ func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, er
 			ON users.login_42 = profiles.login_42
 		WHERE profiles.day_key = ? AND profiles.login_42 = ?
 		LIMIT 1
-	`, currentRuntimeDayKey(), login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &badgePostingOff, &user.BlacklistReason)
+	`, currentRuntimeDayKey(), login).Scan(&user.Login42, &isApprentice, &profile, &user.Status, &user.Status42, &statusOverridden, &isBlacklisted, &isContributor, &badgePostingOff, &user.BlacklistReason)
 	if err == sql.ErrNoRows {
 		return AdminUserSummary{}, false, nil
 	}
@@ -2883,6 +2911,7 @@ func loadCurrentAdminDayProfileByLogin(login string) (AdminUserSummary, bool, er
 	user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 	user.StatusOverridden = statusOverridden == 1
 	user.IsBlacklisted = isBlacklisted == 1
+	user.IsContributor = isContributor == 1
 	user.BadgePostingOff = badgePostingOff == 1
 
 	return user, true, nil
@@ -2895,7 +2924,7 @@ func loadBaseApprenticeUsers() (map[string]User, error) {
 
 	rows, err := storageQuery(`
 		SELECT login_42, is_apprentice, profile, status, status_42, status_overridden,
-			is_blacklisted, badge_posting_off, blacklist_reason
+			is_blacklisted, is_contributor, badge_posting_off, blacklist_reason
 		FROM watchdog_users
 	`)
 	if err != nil {
@@ -2910,6 +2939,7 @@ func loadBaseApprenticeUsers() (map[string]User, error) {
 		var profile int
 		var statusOverridden int
 		var isBlacklisted int
+		var isContributor int
 		var badgePostingOff int
 
 		if err := rows.Scan(
@@ -2920,6 +2950,7 @@ func loadBaseApprenticeUsers() (map[string]User, error) {
 			&user.Status42,
 			&statusOverridden,
 			&isBlacklisted,
+			&isContributor,
 			&badgePostingOff,
 			&user.BlacklistReason,
 		); err != nil {
@@ -2933,6 +2964,7 @@ func loadBaseApprenticeUsers() (map[string]User, error) {
 		user.Status42 = coalesceManagedStatus(user.Status42, statusFromSignals(user.IsApprentice, user.Profile))
 		user.StatusOverridden = statusOverridden == 1
 		user.IsBlacklisted = isBlacklisted == 1
+		user.IsContributor = isContributor == 1
 		user.BadgePostingOff = badgePostingOff == 1
 		user.BlacklistReason = strings.TrimSpace(user.BlacklistReason)
 

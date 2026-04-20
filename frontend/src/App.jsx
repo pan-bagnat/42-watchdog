@@ -574,6 +574,50 @@ async function requestJSON(url, options = {}) {
   return { response, text, json };
 }
 
+function stripHTML(value) {
+  return String(value || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isLikelyRawServerError(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "") {
+    return false;
+  }
+  return normalized.includes("<html") ||
+    normalized.includes("<body") ||
+    normalized.includes("<head") ||
+    normalized.includes("nginx/") ||
+    normalized.includes("bad gateway") ||
+    normalized.includes("friendly error page");
+}
+
+function extractRequestErrorMessage(response, json, text, fallbackMessage) {
+  const jsonMessage = typeof json?.message === "string" ? json.message.trim() : "";
+  if (jsonMessage !== "" && !isLikelyRawServerError(jsonMessage)) {
+    return jsonMessage;
+  }
+
+  const cleanText = stripHTML(text);
+  if (cleanText !== "" && !isLikelyRawServerError(cleanText)) {
+    return cleanText;
+  }
+
+  if (response?.status === 401) {
+    return "Authentification requise.";
+  }
+  if (response?.status === 403) {
+    return "Accès refusé.";
+  }
+  if (response?.status === 404) {
+    return "Ressource introuvable.";
+  }
+  if (response?.status >= 500) {
+    return "Erreur serveur temporaire. Réessayez dans un instant.";
+  }
+
+  return fallbackMessage;
+}
+
 const liveUpdateScopes = {
   user: {
     endpoint: "/api/live",
@@ -853,6 +897,131 @@ function BlacklistActionButton({ blacklisted, disabled, onClick }) {
         </svg>
       </span>
     </button>
+  );
+}
+
+const CONTRIBUTOR_CONFETTI_COLORS = ["#f4c76a", "#ff8c69", "#56c8ad", "#4f8df6", "#f78fb3", "#b388ff"];
+const CONTRIBUTOR_CONFETTI_PIECES = [
+  { dx: -34, dy: -40, rotation: -28, delay: 0 },
+  { dx: -18, dy: -52, rotation: -12, delay: 30 },
+  { dx: 0, dy: -58, rotation: 4, delay: 60 },
+  { dx: 18, dy: -52, rotation: 18, delay: 20 },
+  { dx: 34, dy: -40, rotation: 30, delay: 80 },
+  { dx: -28, dy: -20, rotation: -42, delay: 40 },
+  { dx: 28, dy: -20, rotation: 42, delay: 70 },
+  { dx: -10, dy: -30, rotation: -14, delay: 90 },
+  { dx: 10, dy: -30, rotation: 14, delay: 110 }
+];
+function ContributorActionButton({
+  contributor,
+  disabled,
+  onClick,
+  celebrate = false,
+  className = ""
+}) {
+  const [bursts, setBursts] = useState([]);
+  const buttonRef = useRef(null);
+
+  if (!contributor && celebrate) {
+    return null;
+  }
+
+  const spawnConfetti = () => {
+    const button = buttonRef.current;
+    const buttonWidth = button?.offsetWidth ?? 0;
+
+    // centre réel du bouton
+    const centerX = buttonWidth / 2;
+
+    const now = Date.now();
+
+    for (let burstIndex = 0; burstIndex < 2; burstIndex += 1) {
+      const burstId = `${now}-${Math.random()}-${burstIndex}`;
+
+      // petits écarts autour du centre
+      const offsetX = centerX - 8 + (burstIndex === 0 ? -6 : 6);
+
+      const pieces = CONTRIBUTOR_CONFETTI_PIECES.map((piece, index) => ({
+        id: `${burstId}-${index}`,
+        dx: piece.dx,
+        dy: piece.dy,
+        rotation: piece.rotation,
+        delay: piece.delay,
+        color:
+          CONTRIBUTOR_CONFETTI_COLORS[
+            Math.floor(Math.random() * CONTRIBUTOR_CONFETTI_COLORS.length)
+          ]
+      }));
+
+      setBursts((current) => [
+        ...current,
+        {
+          id: burstId,
+          offsetX,
+          pieces
+        }
+      ]);
+
+      window.setTimeout(() => {
+        setBursts((current) => current.filter((burst) => burst.id !== burstId));
+      }, 1200);
+    }
+  };
+
+  return (
+    <span className={`contributor-action-shell ${className}`.trim()}>
+      <button
+        ref={buttonRef}
+        className={`contributor-action-button${contributor ? " contributor-action-button-active" : ""}`}
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          if (celebrate && contributor) {
+            spawnConfetti();
+          }
+          onClick?.();
+        }}
+        title={contributor ? "Bug hunter" : "Marquer Bug hunter"}
+        aria-label={contributor ? "Bug hunter" : "Marquer Bug hunter"}
+        aria-pressed={contributor}
+      >
+        <svg className="contributor-action-button-icon" viewBox="0 0 64 64" aria-hidden>
+          <path
+            className="contributor-action-button-top"
+            d="M8 50H56L62 26L42 36L32 16L22 36L2 26Z"
+          />
+          <path
+            className="contributor-action-button-base"
+            d="M6 57H58L56 50H8Z"
+          />
+        </svg>
+      </button>
+
+      {celebrate && contributor
+        ? bursts.map((burst) => (
+            <span
+              key={burst.id}
+              className="contributor-confetti-burst"
+              style={{ "--confetti-origin-x": `${burst.offsetX}px` }}
+              aria-hidden
+            >
+              {burst.pieces.map((piece) => (
+                <span
+                  key={piece.id}
+                  className="contributor-confetti-piece"
+                  style={{
+                    "--confetti-x": `${piece.dx}px`,
+                    "--confetti-y": `${piece.dy}px`,
+                    "--confetti-rotation": `${piece.rotation}deg`,
+                    "--confetti-delay": `${piece.delay}ms`,
+                    "--confetti-color": piece.color
+                  }}
+                />
+              ))}
+            </span>
+          ))
+        : null}
+    </span>
   );
 }
 
@@ -1475,7 +1644,7 @@ function StudentView({ user, badgeDelaySeconds, onLogout, onToggleView }) {
         return;
       }
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load your profile.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger votre profil."));
       }
       setState({ loading: false, error: "", payload: json });
     } catch (loadError) {
@@ -1601,7 +1770,7 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
       const suffix = query.toString() ? `?${query.toString()}` : "";
       const { response, json, text } = await requestJSON(`/api/admin/users${suffix}`);
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load users.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger les étudiants."));
       }
       setUsers(Array.isArray(json) ? json : []);
     } catch (loadError) {
@@ -1760,7 +1929,10 @@ function AdminUsersIndexView({ user, badgeDelaySeconds, onLogout, onToggleView, 
                 <UserAvatar user={currentUser} />
                 <div className="user-list-main">
                   <strong>
-                    {currentUser.login_42} <UserStateBadges user={currentUser} />
+                    <span className={currentUser?.is_contributor ? "user-login-text contributor-login-text" : "user-login-text"}>
+                      {currentUser.login_42}
+                    </span>
+                    <UserStateBadges user={currentUser} />
                   </strong>
                   <span>{formatStatusLabel(getEffectiveStatus(currentUser))}</span>
                 </div>
@@ -1797,7 +1969,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
     try {
       const { response, json, text } = await requestJSON("/api/admin/reports");
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load daily reports.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger les rapports journaliers."));
       }
       setReportsState({
         loading: false,
@@ -1828,7 +2000,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
         `/api/admin/reports/${encodeURIComponent(dayKey)}`
       );
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load this report day.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger ce rapport journalier."));
       }
       const items = Array.isArray(json) ? json : [];
       setDetailsByDay((current) => ({
@@ -1858,7 +2030,7 @@ function AdminReportsView({ user, badgeDelaySeconds, onLogout, onToggleView, onN
         method: "POST"
       });
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to regenerate this report day.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de régénérer ce rapport journalier."));
       }
       await loadReports();
       await loadReportDay(dayKey);
@@ -2444,7 +2616,7 @@ function AdminStatsView({ user, badgeDelaySeconds, onLogout, onToggleView, onNav
         return;
       }
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load statistics.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger les statistiques."));
       }
       setState({
         loading: false,
@@ -2839,7 +3011,7 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
           });
           return;
         }
-        throw new Error((json && json.message) || text || "Unable to load this day.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger cette journée."));
       }
       setState({ loading: false, error: "", payload: json });
     } catch (loadError) {
@@ -3003,7 +3175,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
         return;
       }
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Unable to load this user.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger cet étudiant."));
       }
       setState({ loading: false, error: "", payload: json });
     } catch (loadError) {
@@ -3115,7 +3287,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
         body: JSON.stringify(partial)
       });
       if (!response.ok) {
-        throw new Error((json && json.message) || text || "Impossible de mettre à jour cet étudiant.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de mettre à jour cet étudiant."));
       }
       await loadUserDetail(login, { monthKey: selectedMonthKey, background: false });
       return true;
@@ -3158,6 +3330,12 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
     });
   }
 
+  async function handleToggleContributor() {
+    await patchAdminSettings({
+      is_contributor: !Boolean(state.payload?.is_contributor)
+    });
+  }
+
   return (
     <>
       <main className="app-shell detail-shell">
@@ -3188,6 +3366,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           dayEndpointBase={`/api/admin/students/${encodeURIComponent(login)}`}
           adminControls={{
             isBlacklisted,
+            isContributor: Boolean(state.payload?.is_contributor),
             status: getEffectiveStatus(state.payload),
             status42: getDetectedStatus(state.payload),
             statusOverridden: Boolean(state.payload?.status_overridden),
@@ -3196,7 +3375,8 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
               setBlacklistReasonInput(String(state.payload?.blacklist_reason || ""));
               setBlacklistModalOpen(true);
             },
-            onStatusChange: handleStatusChange
+            onStatusChange: handleStatusChange,
+            onToggleContributor: handleToggleContributor
           }}
         />
       </main>
@@ -3271,7 +3451,25 @@ function UserPresencePanel({
                 <UserAvatar user={payload} className="user-detail-avatar" />
                 <div className="user-detail-meta">
                   <h2>
-                    {payload.login_42} <UserStateBadges user={payload} />
+                    <span className={payload?.is_contributor ? "user-login-text contributor-login-text" : "user-login-text"}>
+                      {payload.login_42}
+                    </span>
+                    {adminControls ? (
+                      <ContributorActionButton
+                        contributor={adminControls.isContributor}
+                        disabled={adminControls.saving}
+                        onClick={adminControls.onToggleContributor}
+                        className="contributor-action-shell-inline"
+                      />
+                    ) : null}
+                    {!adminControls && Boolean(payload?.is_contributor) ? (
+                      <ContributorActionButton
+                        contributor
+                        celebrate
+                        className="contributor-action-shell-inline"
+                      />
+                    ) : null}
+                    <UserStateBadges user={payload} />
                   </h2>
                   {adminControls ? (
                     <AdminStatusField
@@ -3387,7 +3585,7 @@ function App() {
           setAuthState({ loading: false, user: null, error: "" });
           return;
         }
-        throw new Error((json && json.message) || text || "Unable to load session.");
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de charger la session."));
       }
       setBadgeDelaySeconds(
         typeof json?.badge_delay_seconds === "number" ? json.badge_delay_seconds : null
@@ -3412,7 +3610,7 @@ function App() {
     }
 
     return subscribeToLiveUpdates((event) => {
-      if (event?.type !== "badge_received") {
+      if (event?.type !== "badge_received" && event?.type !== "badge_delay_updated") {
         return;
       }
       if (typeof event.badge_delay_seconds === "number") {

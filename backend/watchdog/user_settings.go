@@ -7,6 +7,7 @@ import (
 
 type UserSettingsPatch struct {
 	IsBlacklisted    *bool
+	IsContributor    *bool
 	BlacklistReason  *string
 	Status           *string
 	StatusOverridden *bool
@@ -85,6 +86,9 @@ func UpdateUserSettings(login string, patch UserSettingsPatch) (UserSettings, er
 
 	if patch.IsBlacklisted != nil {
 		settings.IsBlacklisted = *patch.IsBlacklisted
+	}
+	if patch.IsContributor != nil {
+		settings.IsContributor = *patch.IsContributor
 	}
 	if patch.BlacklistReason != nil {
 		settings.BlacklistReason = *patch.BlacklistReason
