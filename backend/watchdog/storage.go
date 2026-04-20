@@ -3806,8 +3806,17 @@ func buildHistoricalReportRecord(dayKey string, user User, attendancePosts []Att
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s while building report snapshot: %v", login, dayKey, calendarErr))
 	}
 
-	badgeDuration := CombinedRetainedDuration(realBadgeEvents, user.FirstAccess, user.LastAccess, nil)
-	retainedDuration := CombinedRetainedDuration(realBadgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
+	effectiveBadgeEvents := applyAttendanceBoundsFallback(realBadgeEvents, attendanceBounds)
+	if len(effectiveBadgeEvents) > 0 {
+		user.FirstAccess = effectiveBadgeEvents[0].Timestamp
+		user.LastAccess = effectiveBadgeEvents[len(effectiveBadgeEvents)-1].Timestamp
+	} else if len(locationSessions) > 0 {
+		user.FirstAccess = locationSessions[0].BeginAt
+		user.LastAccess = locationSessions[len(locationSessions)-1].EndAt
+	}
+
+	badgeDuration := CombinedRetainedDuration(effectiveBadgeEvents, user.FirstAccess, user.LastAccess, nil)
+	retainedDuration := CombinedRetainedDuration(effectiveBadgeEvents, user.FirstAccess, user.LastAccess, locationSessions)
 	user.Login42 = login
 	user.BadgeDuration = badgeDuration
 	user.Duration = retainedDuration
@@ -3816,7 +3825,7 @@ func buildHistoricalReportRecord(dayKey string, user User, attendancePosts []Att
 		DayKey:           dayKey,
 		User:             user,
 		CalendarDay:      calendarDay,
-		BadgeEvents:      realBadgeEvents,
+		BadgeEvents:      effectiveBadgeEvents,
 		LocationSessions: locationSessions,
 		AttendancePosts:  attendancePosts,
 		RetainedDuration: retainedDuration,

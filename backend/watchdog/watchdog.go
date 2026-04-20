@@ -682,7 +682,7 @@ func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing 
 	}
 
 	seenToday := make([]User, 0, len(logins))
-	expectedToday := make([]User, 0, len(logins))
+	issuesToday := make([]User, 0, len(logins))
 	for _, login := range logins {
 		user := usersByLogin[login]
 		if settings, ok := settingsByLogin[login]; ok {
@@ -706,6 +706,8 @@ func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing 
 			if !isSchoolDay {
 				user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
 				user.Error = fmt.Errorf("Apprentice is not on a school day")
+				issuesToday = append(issuesToday, user)
+				continue
 			}
 			seenToday = append(seenToday, user)
 			continue
@@ -718,17 +720,17 @@ func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing 
 		user.Duration = 0
 		user.PostResult = APPRENTICE_EXPECTED_ABSENT
 		user.Error = fmt.Errorf(APPRENTICE_EXPECTED_ABSENT)
-		expectedToday = append(expectedToday, user)
+		issuesToday = append(issuesToday, user)
 	}
 
 	sort.Slice(seenToday, func(i, j int) bool {
 		return seenToday[i].Login42 < seenToday[j].Login42
 	})
-	sort.Slice(expectedToday, func(i, j int) bool {
-		return expectedToday[i].Login42 < expectedToday[j].Login42
+	sort.Slice(issuesToday, func(i, j int) bool {
+		return issuesToday[i].Login42 < issuesToday[j].Login42
 	})
 
-	return seenToday, expectedToday, nil
+	return seenToday, issuesToday, nil
 }
 
 func refetchMissingApprenticesForReport(usersByLogin map[string]User, settingsByLogin map[string]UserSettings) {
@@ -1103,7 +1105,8 @@ func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *t
 	color := "green"
 	firstColor := "green"
 	lastColor := "green"
-	durationColor := "green"
+	badgeDurationColor := "#666"
+	totalDurationColor := "green"
 	emoji := "✅"
 
 	msg := reportMessageForUser(user)
@@ -1128,10 +1131,10 @@ func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *t
 		lastFormated = "00:00:00"
 	}
 
-	if record.BadgeDuration < 5*time.Hour {
-		durationColor = "red"
-	} else if record.BadgeDuration < 7*time.Hour {
-		durationColor = "orange"
+	if record.RetainedDuration < 5*time.Hour {
+		totalDurationColor = "red"
+	} else if record.RetainedDuration < 7*time.Hour {
+		totalDurationColor = "orange"
 	}
 
 	if user.PostResult != POSTED && user.PostResult != POST_OFF {
@@ -1139,7 +1142,8 @@ func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *t
 		firstColor = "red"
 		lastColor = "red"
 		emoji = "❌"
-		durationColor = "red"
+		badgeDurationColor = "red"
+		totalDurationColor = "red"
 	}
 
 	htmlBody.WriteString(`<tr><td style="white-space: pre; font-family: Menlo, Consolas, 'Courier New', monospace; font-size: 13px; padding: 1px 20px; line-height: 1;">`)
@@ -1147,9 +1151,9 @@ func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *t
 	htmlBody.WriteString(`<span style="color:` + color + `;">` + fmt.Sprintf("%-8s", user.Login42) + `</span>: `)
 	htmlBody.WriteString(`<span style="color:` + firstColor + `;">` + firstFormated + `</span>-`)
 	htmlBody.WriteString(`<span style="color:` + lastColor + `;">` + lastFormated + `</span> `)
-	htmlBody.WriteString(`<span style="color:` + durationColor + `;">` + formatDuration(record.BadgeDuration) + `</span> | `)
+	htmlBody.WriteString(`<span style="color:` + badgeDurationColor + `;">` + formatDuration(record.BadgeDuration) + `</span> | `)
 	htmlBody.WriteString(`<span style="color:#666;">Logtime:</span> ` + formatDuration(LocationSessionsDuration(record.LocationSessions)) + ` | `)
-	htmlBody.WriteString(`<span style="color:#666;">Total:</span> ` + formatDuration(record.RetainedDuration) + ` — `)
+	htmlBody.WriteString(`<span style="color:#666;">Total:</span> <span style="color:` + totalDurationColor + `;">` + formatDuration(record.RetainedDuration) + `</span> — `)
 	htmlBody.WriteString(`<span style="color:` + color + `;">` + msg + `</span>`)
 	htmlBody.WriteString(`</td></tr>`)
 }

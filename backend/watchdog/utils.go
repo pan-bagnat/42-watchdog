@@ -37,6 +37,9 @@ func retainedAccessWindow(first, last time.Time) (time.Time, time.Time, bool) {
 	loc := parisLocation()
 	firstInLoc := first.In(loc)
 	lastInLoc := last.In(loc)
+	if firstInLoc.Year() != lastInLoc.Year() || firstInLoc.Month() != lastInLoc.Month() || firstInLoc.Day() != lastInLoc.Day() {
+		return time.Time{}, time.Time{}, false
+	}
 
 	dayStart := time.Date(firstInLoc.Year(), firstInLoc.Month(), firstInLoc.Day(), 8, 0, 0, 0, loc)
 	dayEnd := time.Date(firstInLoc.Year(), firstInLoc.Month(), firstInLoc.Day(), 20, 0, 0, 0, loc)
@@ -75,12 +78,58 @@ func timeRangesOverlap(startA, endA, startB, endB time.Time) bool {
 	return startA.Before(endB) && endA.After(startB)
 }
 
+func isSameParisDay(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	loc := parisLocation()
+	aInLoc := a.In(loc)
+	bInLoc := b.In(loc)
+	return aInLoc.Year() == bInLoc.Year() && aInLoc.Month() == bInLoc.Month() && aInLoc.Day() == bInLoc.Day()
+}
+
+func retainedTargetDay(badgeEvents []BadgeEvent, fallbackFirst, fallbackLast time.Time, locationSessions []LocationSession) (time.Time, bool) {
+	if len(badgeEvents) > 0 {
+		return badgeEvents[0].Timestamp, true
+	}
+	if !fallbackFirst.IsZero() {
+		return fallbackFirst, true
+	}
+	if !fallbackLast.IsZero() {
+		return fallbackLast, true
+	}
+	for _, session := range locationSessions {
+		if !session.BeginAt.IsZero() {
+			return session.BeginAt, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func badgeRetainedRanges(events []BadgeEvent, fallbackFirst, fallbackLast time.Time) []TimeRange {
+	targetDay, ok := retainedTargetDay(events, fallbackFirst, fallbackLast, nil)
+	if !ok {
+		return nil
+	}
+
 	first := fallbackFirst
 	last := fallbackLast
 	if len(events) > 0 {
-		first = events[0].Timestamp
-		last = events[len(events)-1].Timestamp
+		filtered := make([]BadgeEvent, 0, len(events))
+		for _, event := range events {
+			if isSameParisDay(event.Timestamp, targetDay) {
+				filtered = append(filtered, event)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil
+		}
+		first = filtered[0].Timestamp
+		last = filtered[len(filtered)-1].Timestamp
+	} else {
+		if !isSameParisDay(first, targetDay) || !isSameParisDay(last, targetDay) {
+			return nil
+		}
 	}
 
 	start, end, ok := retainedAccessWindow(first, last)
@@ -106,9 +155,12 @@ func IsCountedLocationSession(session LocationSession) bool {
 	return !startInLoc.Before(dayStart) && !endInLoc.After(dayEnd)
 }
 
-func locationRetainedRanges(sessions []LocationSession) []TimeRange {
+func locationRetainedRanges(sessions []LocationSession, targetDay time.Time) []TimeRange {
 	ranges := make([]TimeRange, 0, len(sessions))
 	for _, session := range sessions {
+		if !targetDay.IsZero() && (!isSameParisDay(session.BeginAt, targetDay) || !isSameParisDay(session.EndAt, targetDay)) {
+			continue
+		}
 		if !IsCountedLocationSession(session) {
 			continue
 		}
@@ -170,7 +222,8 @@ func LocationSessionsDuration(sessions []LocationSession) time.Duration {
 }
 
 func CombinedRetainedDuration(badgeEvents []BadgeEvent, fallbackFirst, fallbackLast time.Time, locationSessions []LocationSession) time.Duration {
+	targetDay, _ := retainedTargetDay(badgeEvents, fallbackFirst, fallbackLast, locationSessions)
 	ranges := badgeRetainedRanges(badgeEvents, fallbackFirst, fallbackLast)
-	ranges = append(ranges, locationRetainedRanges(locationSessions)...)
+	ranges = append(ranges, locationRetainedRanges(locationSessions, targetDay)...)
 	return sumTimeRanges(mergeTimeRanges(ranges))
 }
