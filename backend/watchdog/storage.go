@@ -1590,6 +1590,9 @@ func loadBadgeEventsByLogin(dayKey string) (map[string][]BadgeEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !isWithinAttendanceWindow(ts) {
+			continue
+		}
 		login = strings.ToLower(strings.TrimSpace(login))
 		events[login] = append(events[login], BadgeEvent{
 			Timestamp: ts,
@@ -1627,6 +1630,9 @@ func loadBadgeEventsForLogin(dayKey, login string) ([]BadgeEvent, error) {
 		if err != nil {
 			return nil, err
 		}
+		if !isWithinAttendanceWindow(ts) {
+			continue
+		}
 		events = append(events, BadgeEvent{
 			Timestamp: ts,
 			DoorName:  doorName,
@@ -1635,7 +1641,7 @@ func loadBadgeEventsForLogin(dayKey, login string) ([]BadgeEvent, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	Trace("CACHE", "badge events DB load for %s on %s: %d events", login, dayKey, len(events))
+	Trace("CACHE", "badge events DB load for %s on %s: %d events (outside-window badges excluded)", login, dayKey, len(events))
 	return events, nil
 }
 

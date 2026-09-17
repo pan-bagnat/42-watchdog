@@ -266,7 +266,7 @@ button {
   flex-direction: column;
   margin-bottom: 0.85rem;
   padding: 0.55rem 0.8rem;
-  border-radius: 24px;
+  border-radius: 14px;
   border: 1px solid rgba(154, 184, 171, 0.12);
   background:
     linear-gradient(180deg, rgba(15, 24, 36, 0.96), rgba(11, 18, 29, 0.98)),
@@ -279,6 +279,53 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+}
+
+.admin-header-left {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.admin-header-glyph {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 12px;
+  border: 1px solid rgba(154, 184, 171, 0.16);
+  background: rgba(22, 33, 46, 0.96);
+  color: rgba(232, 243, 238, 0.86);
+  cursor: pointer;
+  animation: admin-header-glyph-appear 0.24s ease-out;
+  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+}
+
+.admin-header-glyph:hover {
+  transform: translateY(-1px);
+  background: rgba(27, 42, 58, 0.98);
+  border-color: rgba(103, 141, 255, 0.5);
+}
+
+.admin-header-glyph-arrow {
+  width: 1.3rem;
+  height: 1.3rem;
+}
+
+@keyframes admin-header-glyph-appear {
+  0% {
+    opacity: 0;
+    transform: scale(0.6) rotate(-45deg);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
+  }
 }
 
 .admin-header-brand {
@@ -348,7 +395,7 @@ button {
   border: 1px solid rgba(154, 184, 171, 0.12);
   background: rgba(22, 33, 46, 0.96);
   color: rgba(232, 243, 238, 0.78);
-  border-radius: 999px;
+  border-radius: 10px;
   padding: 0.42rem 0.8rem;
   font-size: 0.78rem;
   font-weight: 600;
@@ -1667,6 +1714,79 @@ button {
   flex-wrap: wrap;
 }
 
+.attendance-popover-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding: 1.1rem 1.25rem;
+  border-radius: 16px;
+  border: 2px solid rgba(250, 204, 21, 0.85);
+  background: linear-gradient(180deg, rgba(16, 24, 33, 0.98), rgba(11, 18, 28, 0.98));
+  box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.14), 0 18px 44px rgba(0, 0, 0, 0.4);
+  animation: attendance-popover-appear 0.6s ease-out;
+}
+
+@keyframes attendance-popover-appear {
+  0% {
+    box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.14), 0 18px 44px rgba(0, 0, 0, 0.4);
+    transform: scale(0.98);
+  }
+  30% {
+    box-shadow: 0 0 0 8px rgba(250, 204, 21, 0.4), 0 18px 44px rgba(0, 0, 0, 0.4);
+    transform: scale(1.01);
+  }
+  100% {
+    box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.14), 0 18px 44px rgba(0, 0, 0, 0.4);
+    transform: scale(1);
+  }
+}
+
+.attendance-popover-card h2 {
+  margin: 0;
+  color: #f3faf6;
+  font-size: 1.1rem;
+}
+
+.attendance-popover-day {
+  margin: 0;
+  color: rgba(230, 239, 235, 0.78);
+}
+
+.attendance-popover-day strong {
+  color: #f3faf6;
+}
+
+.attendance-popover-fields {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.attendance-popover-field {
+  flex: 1 1 10rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: rgba(230, 239, 235, 0.7);
+}
+
+.attendance-popover-field input[type="time"] {
+  padding: 0.5rem 0.6rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(6, 12, 20, 0.7);
+  color: #f3faf6;
+  font-size: 0.95rem;
+}
+
+.attendance-popover-actions {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
 .presence-calendar-shell {
   display: flex;
   flex-direction: column;
@@ -1937,10 +2057,11 @@ button {
 .primary-button,
 .secondary-button,
 .danger-button {
-  border: 0;
-  border-radius: 999px;
+  border: 1px solid transparent;
+  border-radius: 12px;
   padding: 0.8rem 1.1rem;
-  transition: transform 0.18s ease, filter 0.18s ease, opacity 0.18s ease;
+  transition: transform 0.18s ease, filter 0.18s ease, opacity 0.18s ease, box-shadow 0.18s ease,
+    background 0.18s ease, border-color 0.18s ease;
 }
 
 .primary-button:hover,
@@ -1952,16 +2073,32 @@ button {
 .primary-button {
   background: linear-gradient(135deg, #215ef6, #267db5);
   color: white;
+  box-shadow: 0 10px 22px rgba(33, 94, 246, 0.22);
+}
+
+.primary-button:hover {
+  box-shadow: 0 12px 26px rgba(33, 94, 246, 0.3);
 }
 
 .secondary-button {
-  background: rgba(16, 38, 31, 0.08);
+  border-color: rgba(16, 38, 31, 0.14);
+  background: rgba(16, 38, 31, 0.05);
   color: #0f2b24;
+}
+
+.secondary-button:hover {
+  background: rgba(16, 38, 31, 0.1);
+  border-color: rgba(16, 38, 31, 0.22);
 }
 
 .danger-button {
   background: linear-gradient(135deg, #da3f4e, #b21f44);
   color: white;
+  box-shadow: 0 10px 22px rgba(178, 31, 68, 0.24);
+}
+
+.danger-button:hover {
+  box-shadow: 0 12px 26px rgba(178, 31, 68, 0.32);
 }
 
 .primary-button:disabled,
@@ -2294,6 +2431,10 @@ button {
   color: #b2274a;
 }
 
+.feedback-success {
+  color: #0f8f78;
+}
+
 .calendar-live-pill {
   display: inline-flex;
   align-items: center;
@@ -2377,7 +2518,7 @@ button {
 }
 
 .admin-day-timeline-slot .timeline-frame {
-  min-height: 8.45rem;
+  min-height: 11.55rem;
   padding: 0.55rem 0.85rem 1.9rem;
 }
 
@@ -2399,6 +2540,10 @@ button {
   top: 3.95rem;
 }
 
+.admin-day-timeline-slot .timeline-lane-total {
+  top: 7.05rem;
+}
+
 .admin-day-timeline-slot .timeline-labels {
   margin-top: 0.7rem;
 }
@@ -2410,7 +2555,7 @@ button {
 
 .timeline-frame {
   position: relative;
-  min-height: 12.6rem;
+  min-height: 17.4rem;
   border-radius: 24px;
   padding: 0.9rem 1rem 2.3rem;
   background:
@@ -2445,13 +2590,18 @@ button {
   top: 6.05rem;
 }
 
+.timeline-lane-total {
+  top: 10.8rem;
+}
+
 .timeline-lane-name {
   position: absolute;
+  z-index: 5;
   left: var(--timeline-side-padding);
   top: -0.25rem;
   padding: 0.12rem 0.45rem;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.9);
+  background: #fff;
   color: rgba(16, 38, 31, 0.62);
   font-size: 0.72rem;
   font-weight: 600;
@@ -2529,6 +2679,17 @@ button {
   background: rgba(237, 244, 255, 0.96);
 }
 
+.timeline-reference-departure::before {
+  background: rgba(147, 51, 234, 0.85);
+  box-shadow: 0 0 0 4px rgba(147, 51, 234, 0.12);
+}
+
+.timeline-reference-departure span {
+  color: #7e22ce;
+  background: rgba(245, 235, 255, 0.96);
+  font-weight: 600;
+}
+
 .timeline-reference-edge-start span {
   transform: translate(-15%, -55%);
 }
@@ -2561,6 +2722,51 @@ button {
       rgba(190, 54, 37, 0.14) 20px
     );
   border: 1px solid rgba(190, 54, 37, 0.26);
+}
+
+.timeline-range-total {
+  background: linear-gradient(90deg, rgba(36, 87, 232, 0.24), rgba(36, 87, 232, 0.4));
+  border: 1px solid rgba(31, 84, 216, 0.32);
+}
+
+.timeline-range-preview {
+  z-index: 3;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(250, 204, 21, 0.42) 0,
+    rgba(250, 204, 21, 0.42) 10px,
+    rgba(217, 119, 6, 0.24) 10px,
+    rgba(217, 119, 6, 0.24) 20px
+  );
+  border: 1.5px dashed rgba(250, 204, 21, 0.85);
+  animation: timeline-preview-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes timeline-preview-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 rgba(250, 204, 21, 0);
+    filter: brightness(1);
+  }
+  50% {
+    box-shadow: 0 0 8px rgba(250, 204, 21, 0.45);
+    filter: brightness(1.12);
+  }
+}
+
+.timeline-range-preview-dragging {
+  animation: none;
+  opacity: 0.95;
+}
+
+.timeline-lane-drag-surface {
+  position: absolute;
+  z-index: 4;
+  left: var(--timeline-side-padding);
+  right: var(--timeline-side-padding);
+  top: 0;
+  bottom: 0;
+  cursor: crosshair;
 }
 
 .timeline-event-cut {
@@ -2993,15 +3199,18 @@ button {
 
 .primary-button {
   background: linear-gradient(135deg, #3e62ff, #1d8ac9);
+  box-shadow: 0 10px 22px rgba(62, 98, 255, 0.28);
 }
 
 .secondary-button {
-  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(154, 184, 171, 0.2);
+  background: rgba(255, 255, 255, 0.06);
   color: #eaf6f0;
 }
 
 .danger-button {
   background: linear-gradient(135deg, #c83f54, #992844);
+  box-shadow: 0 10px 22px rgba(153, 40, 68, 0.3);
 }
 
 .secondary-button:hover,
@@ -3172,9 +3381,16 @@ button {
 
 .timeline-lane-name,
 .timeline-reference span {
-  background: rgba(19, 30, 43, 0.92);
   color: rgba(232, 243, 238, 0.86);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+}
+
+.timeline-reference span {
+  background: rgba(19, 30, 43, 0.92);
+}
+
+.timeline-lane-name {
+  background: #131e2b;
 }
 
 .timeline-reference::before {
@@ -3184,6 +3400,21 @@ button {
 .timeline-reference-now span {
   color: #86a9ff;
   background: rgba(17, 31, 55, 0.96);
+}
+
+.timeline-reference-departure::before {
+  background: rgba(168, 85, 247, 0.92);
+  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.16);
+}
+
+.timeline-reference-departure span {
+  color: #c9a4ff;
+  background: rgba(41, 20, 61, 0.96);
+}
+
+.timeline-range-total {
+  background: linear-gradient(90deg, rgba(64, 97, 255, 0.28), rgba(64, 97, 255, 0.46));
+  border: 1px solid rgba(103, 141, 255, 0.4);
 }
 
 .timeline-session-host {

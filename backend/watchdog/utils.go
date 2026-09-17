@@ -106,6 +106,21 @@ func retainedTargetDay(badgeEvents []BadgeEvent, fallbackFirst, fallbackLast tim
 	return time.Time{}, false
 }
 
+// isWithinAttendanceWindow reports whether ts falls within the 07:30-20:30 Paris
+// local attendance window. A lone badge outside this window (e.g. a student
+// leaving just after midnight, tail end of the previous evening) must not be
+// allowed to anchor the day's FirstAccess/LastAccess span: retainedAccessWindow
+// clamps that span to [08:00,20:00], so a single stray badge before 08:00
+// combined with any legitimate badge after 20:00 would otherwise inflate the
+// reported presence to a flat, false 12h.
+func isWithinAttendanceWindow(ts time.Time) bool {
+	loc := parisLocation()
+	local := ts.In(loc)
+	windowStart := time.Date(local.Year(), local.Month(), local.Day(), attendanceWindowStartHour, attendanceWindowStartMinute, 0, 0, loc)
+	windowEnd := time.Date(local.Year(), local.Month(), local.Day(), attendanceWindowEndHour, attendanceWindowEndMinute, 0, 0, loc)
+	return !local.Before(windowStart) && !local.After(windowEnd)
+}
+
 func badgeRetainedRanges(events []BadgeEvent, fallbackFirst, fallbackLast time.Time) []TimeRange {
 	targetDay, ok := retainedTargetDay(events, fallbackFirst, fallbackLast, nil)
 	if !ok {
@@ -117,7 +132,7 @@ func badgeRetainedRanges(events []BadgeEvent, fallbackFirst, fallbackLast time.T
 	if len(events) > 0 {
 		filtered := make([]BadgeEvent, 0, len(events))
 		for _, event := range events {
-			if isSameParisDay(event.Timestamp, targetDay) {
+			if isSameParisDay(event.Timestamp, targetDay) && isWithinAttendanceWindow(event.Timestamp) {
 				filtered = append(filtered, event)
 			}
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,15 +65,22 @@ type apiAttendancePost struct {
 }
 
 type apiStudentMeResponse struct {
-	Day              string               `json:"day"`
-	Live             bool                 `json:"live"`
-	Login            string               `json:"login"`
-	Tracked          bool                 `json:"tracked"`
-	LocationsLoading bool                 `json:"locations_loading,omitempty"`
-	User             *apiUserState        `json:"user,omitempty"`
-	BadgeEvents      []apiBadgeEvent      `json:"badge_events"`
-	LocationSessions []apiLocationSession `json:"location_sessions"`
-	AttendancePosts  []apiAttendancePost  `json:"attendance_posts"`
+	Day              string                  `json:"day"`
+	Live             bool                    `json:"live"`
+	Login            string                  `json:"login"`
+	Tracked          bool                    `json:"tracked"`
+	LocationsLoading bool                    `json:"locations_loading,omitempty"`
+	User             *apiUserState           `json:"user,omitempty"`
+	BadgeEvents      []apiBadgeEvent         `json:"badge_events"`
+	LocationSessions []apiLocationSession    `json:"location_sessions"`
+	AttendancePosts  []apiAttendancePost     `json:"attendance_posts"`
+	CFAAttendance    []apiCFAAttendanceRange `json:"cfa_attendance,omitempty"`
+}
+
+type apiCFAAttendanceRange struct {
+	BeginAt time.Time `json:"begin_at"`
+	EndAt   time.Time `json:"end_at"`
+	Source  string    `json:"source"`
 }
 
 type apiStudentUpdateRequest struct {
@@ -608,7 +616,17 @@ func adminStudentDaysHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func adminStudentHandler(w http.ResponseWriter, r *http.Request) {
-	login := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/students/"))
+	trimmedPath := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/students/"))
+	if attendanceLogin, ok := strings.CutSuffix(trimmedPath, "/attendance"); ok {
+		if attendanceLogin == "" || strings.Contains(attendanceLogin, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		adminPostAttendanceHandler(w, r, attendanceLogin)
+		return
+	}
+
+	login := trimmedPath
 	if login == "" || strings.Contains(login, "/") {
 		http.NotFound(w, r)
 		return
@@ -757,6 +775,44 @@ func adminStudentHandler(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+type apiPostAttendanceRequest struct {
+	Day     string `json:"day"`
+	BeginAt string `json:"begin_at"`
+	EndAt   string `json:"end_at"`
+}
+
+func adminPostAttendanceHandler(w http.ResponseWriter, r *http.Request, login string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body apiPostAttendanceRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "Request body must be valid JSON.")
+		return
+	}
+	if strings.TrimSpace(body.Day) == "" || strings.TrimSpace(body.BeginAt) == "" || strings.TrimSpace(body.EndAt) == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_fields", "day, begin_at and end_at are required.")
+		return
+	}
+
+	record, err := watchdog.PostManualAttendanceForDay(login, body.Day, body.BeginAt, body.EndAt)
+	if err != nil && record.DayKey == "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_attendance", err.Error())
+		return
+	}
+
+	mapped := mapAttendancePosts([]watchdog.AttendancePostRecord{record})[0]
+	if err != nil {
+		watchdog.Log(fmt.Sprintf("[API] WARNING: manual attendance post failed for %s: %v", login, err))
+		writeJSON(w, http.StatusBadGateway, mapped)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, mapped)
 }
 
 func studentMeHandler(w http.ResponseWriter, r *http.Request) {
@@ -1112,6 +1168,10 @@ func mapAttendancePosts(posts []watchdog.AttendancePostRecord) []apiAttendancePo
 }
 
 func mapHistoricalStudentResponse(record watchdog.HistoricalStudentDay) apiStudentMeResponse {
+	cfaAttendance, err := watchdog.CFAAttendanceRecordsForDay(record.User.Login42, record.DayKey)
+	if err != nil {
+		watchdog.Log(fmt.Sprintf("[API] WARNING: could not fetch CFA attendance for %s on %s: %v", record.User.Login42, record.DayKey, err))
+	}
 	return apiStudentMeResponse{
 		Day:              record.DayKey,
 		Live:             false,
@@ -1121,7 +1181,20 @@ func mapHistoricalStudentResponse(record watchdog.HistoricalStudentDay) apiStude
 		BadgeEvents:      mapBadgeEvents(record.BadgeEvents),
 		LocationSessions: mapLocationSessions(record.LocationSessions),
 		AttendancePosts:  mapAttendancePosts(record.AttendancePosts),
+		CFAAttendance:    mapCFAAttendance(cfaAttendance),
 	}
+}
+
+func mapCFAAttendance(records []watchdog.AttendanceBounds) []apiCFAAttendanceRange {
+	out := make([]apiCFAAttendanceRange, 0, len(records))
+	for _, record := range records {
+		out = append(out, apiCFAAttendanceRange{
+			BeginAt: record.BeginAt,
+			EndAt:   record.EndAt,
+			Source:  record.Source,
+		})
+	}
+	return out
 }
 
 func mapAdminUsers(users []watchdog.AdminUserSummary) []apiAdminUserListItem {

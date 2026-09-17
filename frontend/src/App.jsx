@@ -37,6 +37,7 @@ const ADMIN_STATUS_TILES = [
   { key: "staff", label: "Staff", emoji: "🛠️" },
   { key: "extern", label: "Externe", emoji: "🌍" }
 ];
+const WORKING_CALENDAR_DAY_TYPES = new Set(["on_site_school"]);
 const STATS_WEEKDAYS = [
   { value: 0, label: "Lundi" },
   { value: 1, label: "Mardi" },
@@ -562,6 +563,95 @@ function getTimelineSpan(startValue, endValue) {
   };
 }
 
+function clientXToTimelineMinutes(clientX, trackEl) {
+  const rect = trackEl.getBoundingClientRect();
+  if (!rect || rect.width <= 0) {
+    return null;
+  }
+  const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const rawMinutes = TIMELINE_START_MINUTES + ratio * TIMELINE_TOTAL_MINUTES;
+  return Math.round(rawMinutes);
+}
+
+function timelineMinutesToClockString(minutes) {
+  const clamped = Math.min(TIMELINE_END_MINUTES, Math.max(TIMELINE_START_MINUTES, minutes));
+  const hours = Math.floor(clamped / 60);
+  const mins = Math.round(clamped % 60);
+  return `${String(hours).padStart(2, "0")}:${String(mins).padStart(2, "0")}:00`;
+}
+
+function timelineMinutesToPercent(minutes) {
+  const ratio = (minutes - TIMELINE_START_MINUTES) / TIMELINE_TOTAL_MINUTES;
+  return Math.min(100, Math.max(0, ratio * 100));
+}
+
+function clampDateToApprenticeWindow(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return date;
+  }
+  const start = new Date(date);
+  start.setHours(Math.floor(APPRENTICE_START_MINUTES / 60), APPRENTICE_START_MINUTES % 60, 0, 0);
+  const end = new Date(date);
+  end.setHours(Math.floor(APPRENTICE_END_MINUTES / 60), APPRENTICE_END_MINUTES % 60, 0, 0);
+  if (date < start) {
+    return start;
+  }
+  if (date > end) {
+    return end;
+  }
+  return date;
+}
+
+function mergeTimelineRanges(ranges) {
+  const sorted = ranges
+    .map((range) => ({ start: new Date(range.start), end: new Date(range.end) }))
+    .filter(
+      (range) =>
+        !Number.isNaN(range.start.getTime()) &&
+        !Number.isNaN(range.end.getTime()) &&
+        range.end.getTime() > range.start.getTime()
+    )
+    .sort((left, right) => left.start.getTime() - right.start.getTime() || left.end.getTime() - right.end.getTime());
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && range.start.getTime() <= last.end.getTime()) {
+      if (range.end.getTime() > last.end.getTime()) {
+        last.end = range.end;
+      }
+    } else {
+      merged.push({ start: range.start, end: range.end });
+    }
+  }
+  return merged;
+}
+
+function getCombinedPresenceRanges(badgeEvents, locationSessions) {
+  const firstEvent = badgeEvents[0];
+  const lastEvent = badgeEvents[badgeEvents.length - 1];
+  const hasBadgeRange =
+    badgeEvents.length > 1 &&
+    firstEvent &&
+    lastEvent &&
+    new Date(firstEvent.timestamp).getTime() !== new Date(lastEvent.timestamp).getTime();
+  const badgeContribution = hasBadgeRange
+    ? [{ start: clampDateToApprenticeWindow(firstEvent.timestamp), end: clampDateToApprenticeWindow(lastEvent.timestamp) }]
+    : [];
+  const sessionContributions = locationSessions
+    .filter((session) => session.counted && !session.ongoing)
+    .map((session) => ({ start: session.begin_at, end: session.end_at }));
+  const merged = mergeTimelineRanges([...badgeContribution, ...sessionContributions]);
+  if (merged.length > 0) {
+    return merged;
+  }
+  if (firstEvent) {
+    const point = clampDateToApprenticeWindow(firstEvent.timestamp);
+    return [{ start: point, end: point }];
+  }
+  return merged;
+}
+
 async function requestJSON(url, options = {}) {
   const response = await fetch(url, {
     credentials: "include",
@@ -1080,6 +1170,107 @@ function ConfirmationModal({
   );
 }
 
+function PostAttendanceModal({
+  open,
+  login,
+  dayKey,
+  beginClock,
+  endClock,
+  onBeginClockChange,
+  onEndClockChange,
+  onClose,
+  onPosted
+}) {
+  const [posting, setPosting] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setError("");
+    setSuccess("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, dayKey, login]);
+
+  if (!open) {
+    return null;
+  }
+
+  const dayLabel = formatLongDayLabel(dayKey);
+  const isRangeValid = Boolean(beginClock) && Boolean(endClock) && beginClock < endClock;
+
+  async function handleSubmit() {
+    if (!isRangeValid || posting) {
+      return;
+    }
+    setPosting(true);
+    setError("");
+    setSuccess("");
+    try {
+      const { response, json, text } = await requestJSON(`/api/admin/students/${encodeURIComponent(login)}/attendance`, {
+        method: "POST",
+        body: JSON.stringify({ day: dayKey, begin_at: beginClock, end_at: endClock })
+      });
+      if (!response.ok) {
+        throw new Error(extractRequestErrorMessage(response, json, text, "Impossible de poster la présence."));
+      }
+      setSuccess("Présence postée avec succès.");
+      onPosted();
+      window.setTimeout(() => {
+        onClose();
+      }, 900);
+    } catch (postError) {
+      setError(postError instanceof Error ? postError.message : String(postError));
+    } finally {
+      setPosting(false);
+    }
+  }
+
+  return (
+    <div className="attendance-popover-card" role="dialog" aria-modal="false" aria-label="Poster une présence">
+      <h2>Post Attendance</h2>
+      <p className="attendance-popover-day">
+        Pour la journée du <strong>{dayLabel}</strong>
+      </p>
+      <div className="attendance-popover-fields">
+        <label className="attendance-popover-field">
+          <span>Début</span>
+          <input
+            type="time"
+            step="1"
+            value={beginClock}
+            onChange={(event) => onBeginClockChange(event.target.value)}
+          />
+        </label>
+        <label className="attendance-popover-field">
+          <span>Fin</span>
+          <input
+            type="time"
+            step="1"
+            value={endClock}
+            onChange={(event) => onEndClockChange(event.target.value)}
+          />
+        </label>
+        <div className="modal-actions attendance-popover-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Fermer
+          </button>
+          <button className="primary-button" type="button" disabled={!isRangeValid || posting} onClick={handleSubmit}>
+            {posting ? "Envoi..." : "Poster"}
+          </button>
+        </div>
+      </div>
+      {!isRangeValid ? (
+        <p className="feedback feedback-error">L&apos;heure de fin doit être après l&apos;heure de début.</p>
+      ) : null}
+      {error ? <p className="feedback feedback-error">{error}</p> : null}
+      {success ? <p className="feedback feedback-success">{success}</p> : null}
+    </div>
+  );
+}
+
 function LoginPage() {
   const nextTarget = useMemo(() => {
     const params = new URLSearchParams(window.location.search);
@@ -1345,7 +1536,23 @@ function UserPresencePanelSkeleton({ selectedDayKey, selectedMonthKey, showAdmin
   );
 }
 
-function StudentDayTimeline({ badgeEvents, locationSessions, currentTime, showNowMarker = true, locationsLoading = false }) {
+function StudentDayTimeline({
+  badgeEvents,
+  locationSessions,
+  currentTime,
+  showNowMarker = true,
+  locationsLoading = false,
+  totalRanges = [],
+  cfaRanges = [],
+  live = true,
+  attendancePreviewRange = null,
+  postAttendanceMode = false,
+  onPreviewDrag = null,
+  requiredAttendanceSeconds = null,
+  actualAttendanceSeconds = 0,
+  departureBaseTime = null
+}) {
+  const [dragMinutes, setDragMinutes] = useState(null);
   const firstEvent = badgeEvents[0];
   const lastEvent = badgeEvents[badgeEvents.length - 1];
   const rangeStart = firstEvent ? getTimelinePosition(firstEvent.timestamp) : 0;
@@ -1370,6 +1577,71 @@ function StudentDayTimeline({ badgeEvents, locationSessions, currentTime, showNo
       ...getTimelineSpan(session.begin_at, session.end_at)
     }))
     .filter((session) => session.width > 0);
+  const showCFALane = !live;
+  const thirdLaneRanges = showCFALane ? cfaRanges : totalRanges;
+  const thirdLaneLabel = showCFALane ? "CFA" : "Total";
+  const visibleTotalRanges = thirdLaneRanges
+    .map((range) => {
+      const span = getTimelineSpan(range.start, range.end);
+      return { startDate: range.start, endDate: range.end, ...span };
+    })
+    .filter((range) => range.width > 0);
+  const departureDate =
+    showNowMarker && departureBaseTime && typeof requiredAttendanceSeconds === "number"
+      ? new Date(new Date(departureBaseTime).getTime() + Math.max(requiredAttendanceSeconds - actualAttendanceSeconds, 0) * 1000)
+      : null;
+  const visiblePreviewRange = attendancePreviewRange
+    ? (() => {
+        const span = getTimelineSpan(attendancePreviewRange.start, attendancePreviewRange.end);
+        return span.width > 0
+          ? { startDate: attendancePreviewRange.start, endDate: attendancePreviewRange.end, ...span }
+          : null;
+      })()
+    : null;
+  const dragGhostSpan = dragMinutes
+    ? (() => {
+        const start = timelineMinutesToPercent(Math.min(dragMinutes.anchor, dragMinutes.current));
+        const end = timelineMinutesToPercent(Math.max(dragMinutes.anchor, dragMinutes.current));
+        return end - start > 0 ? { start, width: end - start } : null;
+      })()
+    : null;
+
+  function handleThirdLaneDragStart(event) {
+    if (!postAttendanceMode || event.button !== 0) {
+      return;
+    }
+    const trackEl = event.currentTarget;
+    const startMinutes = clientXToTimelineMinutes(event.clientX, trackEl);
+    if (startMinutes == null) {
+      return;
+    }
+    event.preventDefault();
+    let latest = { anchor: startMinutes, current: startMinutes };
+    setDragMinutes(latest);
+
+    function handleMove(moveEvent) {
+      const minutes = clientXToTimelineMinutes(moveEvent.clientX, trackEl);
+      if (minutes == null) {
+        return;
+      }
+      latest = { ...latest, current: minutes };
+      setDragMinutes(latest);
+      if (typeof onPreviewDrag === "function") {
+        const start = Math.min(latest.anchor, latest.current);
+        const end = Math.max(latest.anchor, latest.current);
+        onPreviewDrag(timelineMinutesToClockString(start), timelineMinutesToClockString(Math.max(end, start + 1)));
+      }
+    }
+
+    function handleUp() {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      setDragMinutes(null);
+    }
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  }
 
   return (
     <div className="student-day-timeline">
@@ -1400,6 +1672,15 @@ function StudentDayTimeline({ badgeEvents, locationSessions, currentTime, showNo
         {showNowMarker ? (
           <div className="timeline-reference timeline-reference-now" style={{ left: getTimelineOffset(getTimelinePosition(currentTime) / 100) }}>
             <span>Maintenant</span>
+          </div>
+        ) : null}
+        {departureDate ? (
+          <div
+            className="timeline-reference timeline-reference-departure"
+            style={{ left: getTimelineOffset(getTimelinePosition(departureDate) / 100) }}
+            title={`Départ prévu à ${formatClockTime(departureDate, true)}`}
+          >
+            <span>{formatClockTime(departureDate)}</span>
           </div>
         ) : null}
         <div className="timeline-lane timeline-lane-badges">
@@ -1484,6 +1765,57 @@ function StudentDayTimeline({ badgeEvents, locationSessions, currentTime, showNo
             </div>
           ))}
         </div>
+        <div className="timeline-lane timeline-lane-total">
+          <span className="timeline-lane-name">{thirdLaneLabel}</span>
+          <div className="timeline-track" aria-hidden />
+          {visibleTotalRanges.map((range, index) => (
+            <div
+              key={`third-lane-${range.startDate}-${range.endDate}-${index}`}
+              className="timeline-range timeline-range-total"
+              style={{
+                left: getTimelineOffset(range.start / 100),
+                width: getTimelineWidth(range.width)
+              }}
+              title={`${formatClockTime(range.startDate, true)} -> ${formatClockTime(range.endDate, true)}`}
+              aria-label={`Période ${showCFALane ? "CFA" : "comptabilisée"} de ${formatClockTime(
+                range.startDate,
+                true
+              )} a ${formatClockTime(range.endDate, true)}`}
+            />
+          ))}
+          {dragGhostSpan ? (
+            <div
+              className="timeline-range timeline-range-preview timeline-range-preview-dragging"
+              style={{
+                left: getTimelineOffset(dragGhostSpan.start / 100),
+                width: getTimelineWidth(dragGhostSpan.width)
+              }}
+            />
+          ) : visiblePreviewRange ? (
+            <div
+              className="timeline-range timeline-range-preview"
+              style={{
+                left: getTimelineOffset(visiblePreviewRange.start / 100),
+                width: getTimelineWidth(visiblePreviewRange.width)
+              }}
+              title={`Aperçu à poster: ${formatClockTime(visiblePreviewRange.startDate, true)} -> ${formatClockTime(
+                visiblePreviewRange.endDate,
+                true
+              )}`}
+              aria-label={`Aperçu de la présence à poster, de ${formatClockTime(
+                visiblePreviewRange.startDate,
+                true
+              )} a ${formatClockTime(visiblePreviewRange.endDate, true)}`}
+            />
+          ) : null}
+          {postAttendanceMode ? (
+            <div
+              className="timeline-lane-drag-surface"
+              onMouseDown={handleThirdLaneDragStart}
+              title="Cliquer-glisser pour choisir la plage à poster"
+            />
+          ) : null}
+        </div>
       </div>
       <div className="timeline-labels" aria-hidden>
         {TIMELINE_HOURS.map((label) => (
@@ -1535,7 +1867,7 @@ function Header({ user, badgeDelaySeconds, onLogout, subtitle, viewMode, onToggl
   );
 }
 
-function AdminHeader({ user, badgeDelaySeconds, onLogout, onToggleView, activeSection, onNavigate }) {
+function AdminHeader({ user, badgeDelaySeconds, onLogout, onToggleView, activeSection, onNavigate, hasBack = false }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
   const sections = [
@@ -1569,20 +1901,40 @@ function AdminHeader({ user, badgeDelaySeconds, onLogout, onToggleView, activeSe
   return (
     <header className="admin-header">
       <div className="admin-header-bar">
-        <div className="admin-header-brand">
-          <span className="admin-header-kicker">Espace administration</span>
-          <nav className="admin-section-nav" aria-label="Navigation administration">
-            {sections.map((section) => (
-              <button
-                key={section.key}
-                type="button"
-                className={`admin-section-tab${activeSection === section.key ? " admin-section-tab-active" : ""}`}
-                onClick={() => onNavigate(section.href)}
-              >
-                {section.label}
-              </button>
-            ))}
-          </nav>
+        <div className="admin-header-left">
+          {hasBack ? (
+            <button
+              type="button"
+              className="admin-header-glyph"
+              onClick={() => onNavigate("/admin/students")}
+              aria-label="Retour aux étudiants"
+            >
+              <svg className="admin-header-glyph-arrow" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path
+                  d="M15 5L8 12L15 19"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          ) : null}
+          <div className="admin-header-brand">
+            <span className="admin-header-kicker">Espace administration</span>
+            <nav className="admin-section-nav" aria-label="Navigation administration">
+              {sections.map((section) => (
+                <button
+                  key={section.key}
+                  type="button"
+                  className={`admin-section-tab${activeSection === section.key ? " admin-section-tab-active" : ""}`}
+                  onClick={() => onNavigate(section.href)}
+                >
+                  {section.label}
+                </button>
+              ))}
+            </nav>
+          </div>
         </div>
         <div className="admin-header-actions">
           <BadgeDelayChip seconds={badgeDelaySeconds} />
@@ -3063,7 +3415,16 @@ function AdminUserPresenceCalendar({ days, monthKey, selectedDayKey, onChangeMon
   );
 }
 
-function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary = null }) {
+function AdminUserDayDetail({
+  login,
+  dayKey,
+  dayEndpointBase,
+  selectedDaySummary = null,
+  previewRange = null,
+  refreshToken = 0,
+  postAttendanceMode = false,
+  onPreviewDrag = null
+}) {
   const [state, setState] = useState({ loading: true, error: "", payload: null });
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const dayRequestRef = useRef(0);
@@ -3128,6 +3489,14 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
   }, [dayEndpointBase, dayKey, login]);
 
   useEffect(() => {
+    if (refreshToken === 0) {
+      return;
+    }
+    void loadDay(dayKey, { background: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshToken]);
+
+  useEffect(() => {
     return () => {
       dayAbortRef.current?.abort();
     };
@@ -3169,13 +3538,53 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
       .filter((session) => overlapsStudentTimeline(session.begin_at, session.end_at))
       .sort((left, right) => new Date(left.begin_at) - new Date(right.begin_at));
   }, [state.payload]);
-  const firstBadge = badgeEvents.length > 0 ? badgeEvents[0] : null;
-  const lastBadge = badgeEvents.length > 0 ? badgeEvents[badgeEvents.length - 1] : null;
-  const firstBadgeValue = firstBadge ? formatClockTime(firstBadge.timestamp, true) : "Aucun";
-  const lastBadgeValue = lastBadge ? formatClockTime(lastBadge.timestamp, true) : "Aucun";
+  const totalRanges = useMemo(
+    () => getCombinedPresenceRanges(badgeEvents, locationSessions),
+    [badgeEvents, locationSessions]
+  );
+  const cfaRanges = useMemo(
+    () =>
+      mergeTimelineRanges(
+        (state.payload?.cfa_attendance || [])
+          .map((record) => ({
+            start: clampDateToApprenticeWindow(record.begin_at),
+            end: clampDateToApprenticeWindow(record.end_at)
+          }))
+          .filter((range) => range.end.getTime() > range.start.getTime())
+      ),
+    [state.payload]
+  );
+  const isLiveDay = Boolean(state.payload?.live);
+  const attendancePreviewRange = useMemo(() => {
+    if (!previewRange || !previewRange.begin || !previewRange.end) {
+      return null;
+    }
+    const dayDate = parseDayKey(dayKey);
+    if (!dayDate) {
+      return null;
+    }
+    const [beginHours, beginMinutes] = previewRange.begin.split(":").map(Number);
+    const [endHours, endMinutes] = previewRange.end.split(":").map(Number);
+    if ([beginHours, beginMinutes, endHours, endMinutes].some((value) => Number.isNaN(value))) {
+      return null;
+    }
+    const start = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate(), beginHours, beginMinutes, 0);
+    const end = new Date(dayDate.getFullYear(), dayDate.getMonth(), dayDate.getDate(), endHours, endMinutes, 0);
+    if (end.getTime() <= start.getTime()) {
+      return null;
+    }
+    return { start, end };
+  }, [previewRange, dayKey]);
+  const firstPresence = totalRanges.length > 0 ? totalRanges[0].start : null;
+  const lastPresence = totalRanges.length > 0 ? totalRanges[totalRanges.length - 1].end : null;
+  const firstPresenceValue = firstPresence ? formatClockTime(firstPresence, true) : "Aucune";
+  const lastPresenceValue = lastPresence ? formatClockTime(lastPresence, true) : "Aucune";
   const expectedSeconds = typeof selectedDaySummary?.required_attendance_hours === "number"
     ? Math.round(selectedDaySummary.required_attendance_hours * 3600)
     : null;
+  const isWorkingDay = WORKING_CALENDAR_DAY_TYPES.has(
+    String(selectedDaySummary?.day_type || "").trim().toLowerCase()
+  );
   const actualSeconds = state.payload?.tracked && state.payload?.user
     ? Number(state.payload.user.duration_seconds || 0)
     : 0;
@@ -3201,8 +3610,8 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
           <>
             <div className="student-day-summary admin-day-summary-grid">
               <KeyValue label="Badges" value={String(badgeEvents.length)} />
-              <KeyValue label="Premier badge" value={firstBadgeValue} />
-              <KeyValue label="Dernier badge" value={lastBadgeValue} />
+              <KeyValue label="Première présence" value={firstPresenceValue} />
+              <KeyValue label="Dernière présence" value={lastPresenceValue} />
               <KeyValue
                 label="Heures présence"
                 value={
@@ -3230,6 +3639,15 @@ function AdminUserDayDetail({ login, dayKey, dayEndpointBase, selectedDaySummary
             currentTime={currentTime}
             showNowMarker={isToday}
             locationsLoading={Boolean(state.payload.locations_loading)}
+            totalRanges={totalRanges}
+            cfaRanges={cfaRanges}
+            live={isLiveDay}
+            attendancePreviewRange={attendancePreviewRange}
+            postAttendanceMode={postAttendanceMode}
+            onPreviewDrag={onPreviewDrag}
+            requiredAttendanceSeconds={isWorkingDay ? expectedSeconds : null}
+            actualAttendanceSeconds={actualSeconds}
+            departureBaseTime={lastPresence}
           />
         ) : null}
       </section>
@@ -3432,7 +3850,7 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
 
   return (
     <>
-      <main className="app-shell detail-shell">
+      <main className="app-shell">
         <AdminHeader
           user={user}
           badgeDelaySeconds={badgeDelaySeconds}
@@ -3440,12 +3858,8 @@ function AdminUserDetailView({ login, user, badgeDelaySeconds, onLogout, onToggl
           onToggleView={onToggleView}
           activeSection="students"
           onNavigate={onNavigate}
+          hasBack
         />
-        <div className="action-row">
-          <button className="secondary-button" type="button" onClick={() => onNavigate("/admin/students")}>
-            Retour aux étudiants
-          </button>
-        </div>
 
         <UserPresencePanel
           loading={state.loading}
@@ -3522,6 +3936,11 @@ function UserPresencePanel({
   const selectedDaySummary = selectedDayKey
     ? (payload?.days || []).find((day) => day.day === selectedDayKey) || null
     : null;
+  const [attendanceModalOpen, setAttendanceModalOpen] = useState(false);
+  const [attendanceBeginClock, setAttendanceBeginClock] = useState("08:00:00");
+  const [attendanceEndClock, setAttendanceEndClock] = useState("20:00:00");
+  const [attendanceRefreshToken, setAttendanceRefreshToken] = useState(0);
+  const attendancePreview = attendanceModalOpen ? { begin: attendanceBeginClock, end: attendanceEndClock } : null;
 
   if (loading) {
     return (
@@ -3587,6 +4006,19 @@ function UserPresencePanel({
                     disabled={adminControls.saving}
                     onClick={adminControls.onOpenBlacklistModal}
                   />
+                  {selectedDayKey ? (
+                    <button
+                      className="secondary-button post-attendance-trigger"
+                      type="button"
+                      onClick={() => {
+                        setAttendanceBeginClock("08:00:00");
+                        setAttendanceEndClock("20:00:00");
+                        setAttendanceModalOpen(true);
+                      }}
+                    >
+                      Post Attendance
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
               <BadgeDelayChip seconds={badgeDelaySeconds} />
@@ -3602,19 +4034,35 @@ function UserPresencePanel({
                 {adminControls && payload.blacklist_reason ? <p>Motif: {payload.blacklist_reason}</p> : null}
               </div>
             ) : null}
-            <div className="warning-callout" role="note" aria-label="Avertissement">
-              <strong>Attention</strong>
-              <p>
-                Les calendriers et durées affichés sur Watchdog sont fournis à titre indicatif et peuvent évoluer
-                au cours de la journée.
-                <br />
-                En fin de journée, seule la présence affichée sur{" "}
-                <a href="https://cfa.42.fr" target="_blank" rel="noreferrer">
-                  cfa.42.fr
-                </a>{" "}
-                fait foi.
-              </p>
-            </div>
+            {adminControls && attendanceModalOpen && selectedDayKey ? (
+              <PostAttendanceModal
+                open={attendanceModalOpen}
+                login={login}
+                dayKey={selectedDayKey}
+                beginClock={attendanceBeginClock}
+                endClock={attendanceEndClock}
+                onBeginClockChange={setAttendanceBeginClock}
+                onEndClockChange={setAttendanceEndClock}
+                onClose={() => setAttendanceModalOpen(false)}
+                onPosted={() => {
+                  setAttendanceRefreshToken((current) => current + 1);
+                }}
+              />
+            ) : (
+              <div className="warning-callout" role="note" aria-label="Avertissement">
+                <strong>Attention</strong>
+                <p>
+                  Les calendriers et durées affichés sur Watchdog sont fournis à titre indicatif et peuvent évoluer
+                  au cours de la journée.
+                  <br />
+                  En fin de journée, seule la présence affichée sur{" "}
+                  <a href="https://cfa.42.fr" target="_blank" rel="noreferrer">
+                    cfa.42.fr
+                  </a>{" "}
+                  fait foi.
+                </p>
+              </div>
+            )}
           </div>
           {selectedDayKey ? (
             <AdminUserDayDetail
@@ -3622,6 +4070,13 @@ function UserPresencePanel({
               dayKey={selectedDayKey}
               dayEndpointBase={dayEndpointBase}
               selectedDaySummary={selectedDaySummary}
+              previewRange={attendancePreview}
+              refreshToken={attendanceRefreshToken}
+              postAttendanceMode={attendanceModalOpen}
+              onPreviewDrag={(begin, end) => {
+                setAttendanceBeginClock(begin);
+                setAttendanceEndClock(end);
+              }}
             />
           ) : (
             <section className="admin-day-summary-slot admin-day-summary-empty">

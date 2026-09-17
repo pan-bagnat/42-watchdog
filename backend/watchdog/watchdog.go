@@ -360,6 +360,10 @@ func UpdateUserAccess(userID int, accessControlUsername string, timeStamp time.T
 	}
 
 	Log(fmt.Sprintf("[WATCHDOG] 🚪 User %s used door %s at %s", user.Login42, doorName, timeStamp.Format("15:04:05 MST")))
+	if !isWithinAttendanceWindow(timeStamp) {
+		Log(fmt.Sprintf("[WATCHDOG] 🚪 Badge for %s at %s is outside the 07:30-20:30 attendance window, recorded but ignored for presence", user.Login42, timeStamp.Format("15:04:05 MST")))
+		return
+	}
 	if user.FirstAccess.IsZero() || user.FirstAccess.After(timeStamp) {
 		user.FirstAccess = timeStamp
 		user.Duration = user.LastAccess.Sub(user.FirstAccess)
