@@ -1536,6 +1536,26 @@ function UserPresencePanelSkeleton({ selectedDayKey, selectedMonthKey, showAdmin
   );
 }
 
+function getDepartureDate(totalRanges, requiredAttendanceSeconds) {
+  if (typeof requiredAttendanceSeconds !== "number" || totalRanges.length === 0) {
+    return null;
+  }
+  let cumulativeSeconds = 0;
+  for (const range of totalRanges) {
+    const startMs = new Date(range.start).getTime();
+    const endMs = new Date(range.end).getTime();
+    const durationSeconds = Math.max((endMs - startMs) / 1000, 0);
+    if (cumulativeSeconds + durationSeconds >= requiredAttendanceSeconds) {
+      const neededSeconds = requiredAttendanceSeconds - cumulativeSeconds;
+      return new Date(startMs + neededSeconds * 1000);
+    }
+    cumulativeSeconds += durationSeconds;
+  }
+  const lastRangeEndMs = new Date(totalRanges[totalRanges.length - 1].end).getTime();
+  const remainingSeconds = requiredAttendanceSeconds - cumulativeSeconds;
+  return new Date(lastRangeEndMs + remainingSeconds * 1000);
+}
+
 function StudentDayTimeline({
   badgeEvents,
   locationSessions,
@@ -1548,9 +1568,7 @@ function StudentDayTimeline({
   attendancePreviewRange = null,
   postAttendanceMode = false,
   onPreviewDrag = null,
-  requiredAttendanceSeconds = null,
-  actualAttendanceSeconds = 0,
-  departureBaseTime = null
+  requiredAttendanceSeconds = null
 }) {
   const [dragMinutes, setDragMinutes] = useState(null);
   const firstEvent = badgeEvents[0];
@@ -1586,10 +1604,7 @@ function StudentDayTimeline({
       return { startDate: range.start, endDate: range.end, ...span };
     })
     .filter((range) => range.width > 0);
-  const departureDate =
-    showNowMarker && departureBaseTime && typeof requiredAttendanceSeconds === "number"
-      ? new Date(new Date(departureBaseTime).getTime() + Math.max(requiredAttendanceSeconds - actualAttendanceSeconds, 0) * 1000)
-      : null;
+  const departureDate = showNowMarker ? getDepartureDate(totalRanges, requiredAttendanceSeconds) : null;
   const visiblePreviewRange = attendancePreviewRange
     ? (() => {
         const span = getTimelineSpan(attendancePreviewRange.start, attendancePreviewRange.end);
@@ -3646,8 +3661,6 @@ function AdminUserDayDetail({
             postAttendanceMode={postAttendanceMode}
             onPreviewDrag={onPreviewDrag}
             requiredAttendanceSeconds={isWorkingDay ? expectedSeconds : null}
-            actualAttendanceSeconds={actualSeconds}
-            departureBaseTime={lastPresence}
           />
         ) : null}
       </section>
