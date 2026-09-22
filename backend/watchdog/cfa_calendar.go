@@ -52,6 +52,11 @@ type cfaApprenticeshipListResponse struct {
 type cfaApprenticeshipItem struct {
 	Status   string             `json:"status"`
 	Training cfaTrainingSummary `json:"training"`
+	Contract *cfaContract       `json:"contract"`
+}
+
+type cfaContract struct {
+	BeginAt string `json:"begin_at"`
 }
 
 type cfaTrainingSummary struct {
@@ -171,7 +176,7 @@ func loadStudentCalendarMonth(login, monthKey string) (map[string]StudentCalenda
 		return calendar, nil
 	}
 
-	trainingID, found, err := loadCFATrainingID(login, monthKey)
+	trainingID, found, contractBeginAt, err := loadCFATrainingID(login, monthKey)
 	if err != nil {
 		return calendar, err
 	}
@@ -203,47 +208,90 @@ func loadStudentCalendarMonth(login, monthKey string) (map[string]StudentCalenda
 	}
 	Trace("BUILD", "CFA calendar merged for %s on %s: training_id=%d overridden_days=%d total_days=%d", login, monthKey, trainingID, mergedDays, len(calendar))
 
+	overriddenDays := applyContractStartOverride(calendar, contractBeginAt)
+	if overriddenDays > 0 {
+		Trace("BUILD", "CFA calendar pre-contract override for %s on %s: contract_begin_at=%s overridden_days=%d", login, monthKey, contractBeginAt, overriddenDays)
+	}
+
 	return calendar, nil
 }
 
-func loadCFATrainingID(login, monthKey string) (int, bool, error) {
-	if trainingID, found, ok, err := loadPersistedCFATrainingID(login, monthKey); err != nil {
-		return 0, false, err
+// applyContractStartOverride forces days before the apprentice's contract start date to
+// DayTypeCompany. The CFA API reports on_site_school/off_site_school for days before an
+// apprentice's actual contract start (it has no real schedule for that period yet), which
+// otherwise triggers false "didn't come today" warnings while the apprentice is still working
+// at their company.
+func applyContractStartOverride(calendar map[string]StudentCalendarDay, contractBeginAt string) int {
+	contractBeginAt = strings.TrimSpace(contractBeginAt)
+	if contractBeginAt == "" {
+		return 0
+	}
+
+	overridden := 0
+	for dayKey, day := range calendar {
+		if dayKey >= contractBeginAt {
+			continue
+		}
+		if !isSchoolDayType(day.DayType) {
+			continue
+		}
+		calendar[dayKey] = StudentCalendarDay{
+			DayType:                 DayTypeCompany,
+			DayTypeLabel:            cfaDayTypeLabel(DayTypeCompany),
+			RequiredAttendanceHours: inferredRequiredAttendanceHours(DayTypeCompany, nil),
+		}
+		overridden++
+	}
+	return overridden
+}
+
+func loadCFATrainingID(login, monthKey string) (int, bool, string, error) {
+	if trainingID, found, contractBeginAt, ok, err := loadPersistedCFATrainingID(login, monthKey); err != nil {
+		return 0, false, "", err
 	} else if ok {
 		Trace("CACHE", "CFA training id cache hit for %s on %s: training_id=%d found=%t", normalizeLogin(login), monthKey, trainingID, found)
-		return trainingID, found, nil
+		return trainingID, found, contractBeginAt, nil
 	}
 	Trace("CACHE", "CFA training id cache miss for %s on %s", normalizeLogin(login), monthKey)
 
 	var response cfaApprenticeshipListResponse
 	path := fmt.Sprintf("/apprenticeship/list?student_login=%s", url.QueryEscape(normalizeLogin(login)))
 	if err := cfaGetJSON(path, &response); err != nil {
-		return 0, false, err
+		return 0, false, "", err
+	}
+
+	contractBeginAtOf := func(item cfaApprenticeshipItem) string {
+		if item.Contract == nil {
+			return ""
+		}
+		return strings.TrimSpace(item.Contract.BeginAt)
 	}
 
 	for _, item := range response.Items {
 		if strings.EqualFold(strings.TrimSpace(item.Status), "active") && item.Training.ID > 0 {
-			if err := savePersistedCFATrainingID(login, item.Training.ID, monthKey); err != nil {
-				return 0, false, err
+			contractBeginAt := contractBeginAtOf(item)
+			if err := savePersistedCFATrainingID(login, item.Training.ID, contractBeginAt, monthKey); err != nil {
+				return 0, false, "", err
 			}
-			Trace("BUILD", "CFA training id selected for %s on %s: active training_id=%d", normalizeLogin(login), monthKey, item.Training.ID)
-			return item.Training.ID, true, nil
+			Trace("BUILD", "CFA training id selected for %s on %s: active training_id=%d contract_begin_at=%s", normalizeLogin(login), monthKey, item.Training.ID, contractBeginAt)
+			return item.Training.ID, true, contractBeginAt, nil
 		}
 	}
 	for _, item := range response.Items {
 		if item.Training.ID > 0 {
-			if err := savePersistedCFATrainingID(login, item.Training.ID, monthKey); err != nil {
-				return 0, false, err
+			contractBeginAt := contractBeginAtOf(item)
+			if err := savePersistedCFATrainingID(login, item.Training.ID, contractBeginAt, monthKey); err != nil {
+				return 0, false, "", err
 			}
-			Trace("BUILD", "CFA training id selected for %s on %s: fallback training_id=%d", normalizeLogin(login), monthKey, item.Training.ID)
-			return item.Training.ID, true, nil
+			Trace("BUILD", "CFA training id selected for %s on %s: fallback training_id=%d contract_begin_at=%s", normalizeLogin(login), monthKey, item.Training.ID, contractBeginAt)
+			return item.Training.ID, true, contractBeginAt, nil
 		}
 	}
-	if err := savePersistedCFATrainingID(login, 0, monthKey); err != nil {
-		return 0, false, err
+	if err := savePersistedCFATrainingID(login, 0, "", monthKey); err != nil {
+		return 0, false, "", err
 	}
 	Trace("BUILD", "CFA training id selected for %s on %s: none", normalizeLogin(login), monthKey)
-	return 0, false, nil
+	return 0, false, "", nil
 }
 
 func loadCFATrainingCalendar(trainingID int) (cfaTrainingCalendar, error) {
@@ -297,40 +345,41 @@ func saveCachedCFATrainingCalendar(trainingID int, calendar cfaTrainingCalendar)
 	Trace("CACHE", "CFA training calendar cache store for training_id=%d: %d dates", trainingID, len(calendar.Dates))
 }
 
-func loadPersistedCFATrainingID(login, monthKey string) (int, bool, bool, error) {
+func loadPersistedCFATrainingID(login, monthKey string) (int, bool, string, bool, error) {
 	if storageDB == nil {
-		return 0, false, false, nil
+		return 0, false, "", false, nil
 	}
 
 	login = normalizeLogin(login)
 	monthKey = strings.TrimSpace(monthKey)
 	if login == "" || monthKey == "" {
-		return 0, false, false, nil
+		return 0, false, "", false, nil
 	}
 
 	var trainingID int
 	var refreshedMonth string
+	var contractBeginAt string
 	err := storageQueryRow(`
-		SELECT training_id, refreshed_month
+		SELECT training_id, refreshed_month, contract_begin_at
 		FROM watchdog_cfa_training_ids
 		WHERE login_42 = ?
-	`, login).Scan(&trainingID, &refreshedMonth)
+	`, login).Scan(&trainingID, &refreshedMonth, &contractBeginAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		Trace("CACHE", "persisted CFA training id miss for %s on %s", login, monthKey)
-		return 0, false, false, nil
+		return 0, false, "", false, nil
 	}
 	if err != nil {
-		return 0, false, false, err
+		return 0, false, "", false, err
 	}
 	if strings.TrimSpace(refreshedMonth) != monthKey {
 		Trace("CACHE", "persisted CFA training id stale for %s: stored_month=%s requested_month=%s", login, strings.TrimSpace(refreshedMonth), monthKey)
-		return 0, false, false, nil
+		return 0, false, "", false, nil
 	}
 	Trace("CACHE", "persisted CFA training id hit for %s on %s: training_id=%d", login, monthKey, trainingID)
-	return trainingID, trainingID > 0, true, nil
+	return trainingID, trainingID > 0, strings.TrimSpace(contractBeginAt), true, nil
 }
 
-func savePersistedCFATrainingID(login string, trainingID int, monthKey string) error {
+func savePersistedCFATrainingID(login string, trainingID int, contractBeginAt, monthKey string) error {
 	if storageDB == nil {
 		return nil
 	}
@@ -344,15 +393,16 @@ func savePersistedCFATrainingID(login string, trainingID int, monthKey string) e
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := storageExec(`
 		INSERT INTO watchdog_cfa_training_ids (
-			login_42, training_id, refreshed_month, updated_at
-		) VALUES (?, ?, ?, ?)
+			login_42, training_id, contract_begin_at, refreshed_month, updated_at
+		) VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(login_42) DO UPDATE SET
 			training_id = excluded.training_id,
+			contract_begin_at = excluded.contract_begin_at,
 			refreshed_month = excluded.refreshed_month,
 			updated_at = excluded.updated_at
-	`, login, trainingID, monthKey, now)
+	`, login, trainingID, strings.TrimSpace(contractBeginAt), monthKey, now)
 	if err == nil {
-		Trace("CACHE", "persisted CFA training id store for %s on %s: training_id=%d", login, monthKey, trainingID)
+		Trace("CACHE", "persisted CFA training id store for %s on %s: training_id=%d contract_begin_at=%s", login, monthKey, trainingID, strings.TrimSpace(contractBeginAt))
 	}
 	return err
 }

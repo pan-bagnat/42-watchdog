@@ -494,13 +494,12 @@ func postAttendanceForUser(user *User) {
 	if dayKey == "" {
 		dayKey = currentRuntimeDayKey()
 	}
+	notSchoolDay := false
 	calendarDay, calendarErr := loadStudentCalendarDay(user.Login42, dayKey)
 	if calendarErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not load school day calendar for %s on %s before posting: %v", user.Login42, dayKey, calendarErr))
 	} else if !isSchoolDayType(calendarDay.DayType) {
-		user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
-		user.Error = fmt.Errorf("apprentice is not on a school day")
-		return
+		notSchoolDay = true
 	}
 
 	payload, err := buildAttendancePayload(*user)
@@ -540,8 +539,16 @@ func postAttendanceForUser(user *User) {
 		return
 	}
 
-	user.PostResult = POSTED
 	user.Error = nil
+	if notSchoolDay {
+		user.PostResult = POSTED_NOT_SCHOOL_DAY_WARNING
+		if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, NOT_SCHOOL_DAY_NOTE, true); err != nil {
+			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
+		}
+		return
+	}
+
+	user.PostResult = POSTED
 	if err := recordAttendancePost(dayKey, *user, payload, &statusCode, resp.Status, "", true); err != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist attendance post for %s: %v", user.Login42, err))
 	}
@@ -557,7 +564,7 @@ func formatPostInfo(user User, loc *time.Location, msg string) string {
 		last = user.LastAccess.In(loc).Format("15:04:05")
 	}
 	emoji := "✅"
-	if user.PostResult != POSTED {
+	if user.PostResult != POSTED && user.PostResult != POSTED_NOT_SCHOOL_DAY_WARNING {
 		emoji = "❌"
 	}
 	return fmt.Sprintf(
@@ -707,11 +714,9 @@ func buildDailyReportUsers(processedUsers []User, dayKey string, refetchMissing 
 
 		if !user.FirstAccess.IsZero() {
 			user.Duration = reportDurationForUser(user)
-			if !isSchoolDay {
-				user.PostResult = POST_SKIPPED_NOT_SCHOOL_DAY
-				user.Error = fmt.Errorf("Apprentice is not on a school day")
-				issuesToday = append(issuesToday, user)
-				continue
+			if !isSchoolDay && strings.TrimSpace(user.PostResult) == "" {
+				user.PostResult = POSTED_NOT_SCHOOL_DAY_WARNING
+				user.Error = nil
 			}
 			seenToday = append(seenToday, user)
 			continue
@@ -1141,7 +1146,7 @@ func addLogToMail(htmlBody *strings.Builder, record HistoricalStudentDay, loc *t
 		totalDurationColor = "orange"
 	}
 
-	if user.PostResult != POSTED && user.PostResult != POST_OFF {
+	if user.PostResult != POSTED && user.PostResult != POST_OFF && user.PostResult != POSTED_NOT_SCHOOL_DAY_WARNING {
 		color = "red"
 		firstColor = "red"
 		lastColor = "red"

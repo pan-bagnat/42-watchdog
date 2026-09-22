@@ -226,6 +226,7 @@ CREATE TABLE IF NOT EXISTS watchdog_historical_attendance_fetches (
 CREATE TABLE IF NOT EXISTS watchdog_cfa_training_ids (
 	login_42 TEXT PRIMARY KEY,
 	training_id INTEGER NOT NULL DEFAULT 0,
+	contract_begin_at TEXT NOT NULL DEFAULT '',
 	refreshed_month TEXT NOT NULL,
 	updated_at TEXT NOT NULL
 );
@@ -362,6 +363,9 @@ func migrateStorageSchema() error {
 	if err := migrateDailyStudentSummariesTable(); err != nil {
 		return err
 	}
+	if err := migrateCFATrainingIdsTable(); err != nil {
+		return err
+	}
 
 	legacyTables := []string{
 		"watchdog_profile_photos",
@@ -414,6 +418,15 @@ func migrateDailyStudentSummariesTable() error {
 				ELSE status
 			END
 	`)
+	return err
+}
+
+func migrateCFATrainingIdsTable() error {
+	if storageDB == nil {
+		return nil
+	}
+
+	_, err := storageExec(`ALTER TABLE watchdog_cfa_training_ids ADD COLUMN IF NOT EXISTS contract_begin_at TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -4252,7 +4265,11 @@ func PopulateUserPostResult(user *User, posts []AttendancePostRecord) {
 	if len(posts) > 0 {
 		last := posts[len(posts)-1]
 		if last.Success {
-			user.PostResult = POSTED
+			if strings.TrimSpace(last.ErrorMessage) == NOT_SCHOOL_DAY_NOTE {
+				user.PostResult = POSTED_NOT_SCHOOL_DAY_WARNING
+			} else {
+				user.PostResult = POSTED
+			}
 			return
 		}
 
