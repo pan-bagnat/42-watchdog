@@ -2373,13 +2373,15 @@ func loadStudentAttendanceDays(login, monthKey string) ([]StudentAttendanceDaySu
 			if err != nil {
 				return nil, err
 			}
-			if !record.User.FirstAccess.IsZero() {
+			if existing.FirstAccess.IsZero() && !record.User.FirstAccess.IsZero() {
 				existing.FirstAccess = record.User.FirstAccess
 			}
-			if !record.User.LastAccess.IsZero() {
+			if existing.LastAccess.IsZero() && !record.User.LastAccess.IsZero() {
 				existing.LastAccess = record.User.LastAccess
 			}
-			existing.Duration = record.RetainedDuration
+			if existing.Duration <= 0 {
+				existing.Duration = record.RetainedDuration
+			}
 		} else {
 			if existing.FirstAccess.IsZero() && bounds != nil {
 				existing.FirstAccess = bounds.BeginAt
