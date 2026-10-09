@@ -61,6 +61,54 @@ func resolveUserIdentityForDay(login, dayKey string) (User, error) {
 	return user, nil
 }
 
+// refreshHistoricalSummaryFromCFA re-fetches a student's CFA (Chronos)
+// attendance records for a day and persists them as that day's stored
+// badge/retained duration and first/last access, so the month calendar,
+// stat tiles, and anything else reading the stored daily summary reflect a
+// manual post immediately instead of waiting for the next nightly batch
+// finalization (which may never re-run for a past day).
+func refreshHistoricalSummaryFromCFA(login, dayKey string) error {
+	cfaRecords, err := CFAAttendanceRecordsForDay(login, dayKey)
+	if err != nil {
+		return err
+	}
+	if len(cfaRecords) == 0 {
+		return nil
+	}
+
+	ranges := make([]TimeRange, 0, len(cfaRecords))
+	for _, bounds := range cfaRecords {
+		ranges = append(ranges, TimeRange{Start: bounds.BeginAt, End: bounds.EndAt})
+	}
+	merged := mergeTimeRanges(ranges)
+	if len(merged) == 0 {
+		return nil
+	}
+	duration := sumTimeRanges(merged)
+	firstAccess := merged[0].Start
+	lastAccess := merged[len(merged)-1].End
+
+	record, ok, err := loadHistoricalStudentDay(login, dayKey)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		record, err = syntheticHistoricalStudentDay(login, dayKey, nil, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	record.DayKey = dayKey
+	record.User.Login42 = normalizeLogin(login)
+	record.User.FirstAccess = firstAccess
+	record.User.LastAccess = lastAccess
+	record.BadgeDuration = duration
+	record.RetainedDuration = duration
+
+	return saveHistoricalSummary(record)
+}
+
 // combineDateAndClock builds a Paris-local instant from a calendar date and a
 // clock string ("HH:MM" or "HH:MM:SS"), letting time.Date resolve the correct
 // UTC offset for that specific date (handles CET/CEST automatically).
@@ -163,6 +211,9 @@ func PostManualAttendance(login, dayKey string, beginAt, endAt time.Time) (Atten
 	record.Success = true
 	if persistErr := recordAttendancePost(dayKey, user, payload, &statusCode, resp.Status, "", true); persistErr != nil {
 		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist manual attendance post for %s: %v", login, persistErr))
+	}
+	if refreshErr := refreshHistoricalSummaryFromCFA(login, dayKey); refreshErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not refresh daily summary for %s on %s after manual post: %v", login, dayKey, refreshErr))
 	}
 	loc := parisLocation()
 	Log(fmt.Sprintf("[WATCHDOG] [MANUAL POST] ✅ %s: %s -> %s posted manually by an admin for %s", login, beginAt.In(loc).Format("15:04:05"), endAt.In(loc).Format("15:04:05"), dayKey))

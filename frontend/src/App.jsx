@@ -3594,8 +3594,11 @@ function AdminUserDayDetail({
     }
     return { start, end };
   }, [previewRange, dayKey]);
-  const firstPresence = totalRanges.length > 0 ? totalRanges[0].start : null;
-  const lastPresence = totalRanges.length > 0 ? totalRanges[totalRanges.length - 1].end : null;
+  // CFA is the source of truth for past days (see actualSeconds below):
+  // prefer its bounds over the badge/logtime-derived ones when available.
+  const presenceRanges = !isLiveDay && cfaRanges.length > 0 ? cfaRanges : totalRanges;
+  const firstPresence = presenceRanges.length > 0 ? presenceRanges[0].start : null;
+  const lastPresence = presenceRanges.length > 0 ? presenceRanges[presenceRanges.length - 1].end : null;
   const firstPresenceValue = firstPresence ? formatClockTime(firstPresence, true) : "Aucune";
   const lastPresenceValue = lastPresence ? formatClockTime(lastPresence, true) : "Aucune";
   const expectedSeconds = typeof selectedDaySummary?.required_attendance_hours === "number"
