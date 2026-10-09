@@ -3561,9 +3561,17 @@ function AdminUserDayDetail({
     () =>
       mergeTimelineRanges(
         (state.payload?.cfa_attendance || [])
+          // CFA ignores a whole attendance record the moment either edge
+          // falls outside the 08:00-20:00 counted window - it does not
+          // truncate it to the window, so a record overflowing past 20:00
+          // must be dropped entirely rather than clamped.
+          .filter(
+            (record) =>
+              !isBeforeApprenticeStart(record.begin_at) && !isAfterApprenticeEnd(record.end_at)
+          )
           .map((record) => ({
-            start: clampDateToApprenticeWindow(record.begin_at),
-            end: clampDateToApprenticeWindow(record.end_at)
+            start: new Date(record.begin_at),
+            end: new Date(record.end_at)
           }))
           .filter((range) => range.end.getTime() > range.start.getTime())
       ),

@@ -154,9 +154,14 @@ func badgeRetainedRanges(events []BadgeEvent, fallbackFirst, fallbackLast time.T
 	return []TimeRange{{Start: start, End: end}}
 }
 
-func IsCountedLocationSession(session LocationSession) bool {
-	start, end := session.BeginAt, session.EndAt
-	if session.Ongoing || start.IsZero() || end.IsZero() || !end.After(start) {
+// isWithinCountedWindow reports whether [start,end) falls entirely inside the
+// counted 08:00-20:00 Paris window for start's calendar day. Unlike
+// retainedAccessWindow (which clamps a span to the window), this rejects the
+// whole range the moment either edge falls outside it - matching how CFA
+// treats attendance records: one that starts or ends outside the window is
+// ignored entirely, not truncated.
+func isWithinCountedWindow(start, end time.Time) bool {
+	if start.IsZero() || end.IsZero() || !end.After(start) {
 		return false
 	}
 
@@ -168,6 +173,13 @@ func IsCountedLocationSession(session LocationSession) bool {
 	dayEnd := time.Date(startInLoc.Year(), startInLoc.Month(), startInLoc.Day(), 20, 0, 0, 0, loc)
 
 	return !startInLoc.Before(dayStart) && !endInLoc.After(dayEnd)
+}
+
+func IsCountedLocationSession(session LocationSession) bool {
+	if session.Ongoing {
+		return false
+	}
+	return isWithinCountedWindow(session.BeginAt, session.EndAt)
 }
 
 func locationRetainedRanges(sessions []LocationSession, targetDay time.Time) []TimeRange {

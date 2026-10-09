@@ -76,8 +76,16 @@ func refreshHistoricalSummaryFromCFA(login, dayKey string) error {
 		return nil
 	}
 
+	// CFA ignores a whole attendance record the moment either edge falls
+	// outside the counted 08:00-20:00 Paris window - it does not truncate
+	// it to the window like badge/logtime's own span does. Mirror that
+	// exactly here so a record overflowing past 20:00 doesn't inflate the
+	// stored duration with time CFA never actually counted.
 	ranges := make([]TimeRange, 0, len(cfaRecords))
 	for _, bounds := range cfaRecords {
+		if !isWithinCountedWindow(bounds.BeginAt, bounds.EndAt) {
+			continue
+		}
 		ranges = append(ranges, TimeRange{Start: bounds.BeginAt, End: bounds.EndAt})
 	}
 	merged := mergeTimeRanges(ranges)
