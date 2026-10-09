@@ -3570,6 +3570,10 @@ function AdminUserDayDetail({
     [state.payload]
   );
   const isLiveDay = Boolean(state.payload?.live);
+  const cfaSeconds = useMemo(
+    () => cfaRanges.reduce((total, range) => total + Math.max(0, (range.end - range.start) / 1000), 0),
+    [cfaRanges]
+  );
   const attendancePreviewRange = useMemo(() => {
     if (!previewRange || !previewRange.begin || !previewRange.end) {
       return null;
@@ -3600,9 +3604,13 @@ function AdminUserDayDetail({
   const isWorkingDay = WORKING_CALENDAR_DAY_TYPES.has(
     String(selectedDaySummary?.day_type || "").trim().toLowerCase()
   );
-  const actualSeconds = state.payload?.tracked && state.payload?.user
+  const badgeDerivedSeconds = state.payload?.tracked && state.payload?.user
     ? Number(state.payload.user.duration_seconds || 0)
     : 0;
+  // CFA (cfa.42.fr) is the source of truth for past days: it reflects manual
+  // attendance posts immediately, while the badge/logtime-derived duration
+  // above is only recomputed by the nightly batch finalization.
+  const actualSeconds = !isLiveDay && cfaRanges.length > 0 ? Math.round(cfaSeconds) : badgeDerivedSeconds;
   const actualPresenceLabel = formatDurationPadded(actualSeconds, state.payload?.user?.duration_human || "0s");
   const expectedPresenceLabel = expectedSeconds == null
     ? "Non défini"

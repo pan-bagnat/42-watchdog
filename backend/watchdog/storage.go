@@ -1148,6 +1148,43 @@ type UserSettings struct {
 	BlacklistReason  string `json:"blacklist_reason,omitempty"`
 }
 
+// canonicalUserIdentityByLogin looks up the persistent 42 identity (id_42,
+// control_access_id/name, is_apprentice, profile) for a login from
+// watchdog_users, the long-lived identity table kept up to date by
+// saveUserIdentity regardless of whether any given day was ever finalized.
+// It's the fallback source of truth when a day has no finalized daily
+// summary (e.g. the student wasn't seen that day) but we still need the
+// student's 42 id to post an attendance record on their behalf.
+func canonicalUserIdentityByLogin(login string) (User, bool, error) {
+	if storageDB == nil {
+		return User{}, false, nil
+	}
+	login = normalizeLogin(login)
+	if login == "" {
+		return User{}, false, nil
+	}
+
+	var (
+		user         User
+		isApprentice int
+		profile      int
+	)
+	err := storageQueryRow(`
+		SELECT login_42, id_42, control_access_id, control_access_name, is_apprentice, profile
+		FROM watchdog_users
+		WHERE login_42 = ?
+	`, login).Scan(&user.Login42, &user.ID42, &user.ControlAccessID, &user.ControlAccessName, &isApprentice, &profile)
+	if err == sql.ErrNoRows {
+		return User{}, false, nil
+	}
+	if err != nil {
+		return User{}, false, err
+	}
+	user.IsApprentice = isApprentice == 1
+	user.Profile = ProfileType(profile)
+	return user, true, nil
+}
+
 func loadUserSettings(login string) (UserSettings, bool, error) {
 	if storageDB == nil {
 		return UserSettings{}, false, nil
@@ -3400,6 +3437,25 @@ func syntheticHistoricalStudentDay(login, dayKey string, sessions []LocationSess
 	} else if ok {
 		record.User.IsApprentice = summary.IsApprentice
 		record.User.Profile = summary.Profile
+	}
+
+	// AdminUserByLogin never carries id_42/control_access_id, so when no
+	// daily summary was ever finalized for this day (e.g. the student
+	// wasn't seen), fall back to the long-lived identity table. Without
+	// this, resolveUserIdentityForDay always fails for unseen days and a
+	// manual attendance post can never be created for them.
+	if strings.TrimSpace(record.User.ID42) == "" {
+		if identity, ok, err := canonicalUserIdentityByLogin(login); err != nil {
+			return HistoricalStudentDay{}, err
+		} else if ok {
+			record.User.ID42 = identity.ID42
+			if record.User.ControlAccessID == 0 {
+				record.User.ControlAccessID = identity.ControlAccessID
+			}
+			if strings.TrimSpace(record.User.ControlAccessName) == "" {
+				record.User.ControlAccessName = identity.ControlAccessName
+			}
+		}
 	}
 
 	return record, nil
