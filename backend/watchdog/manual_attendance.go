@@ -35,10 +35,30 @@ func resolveUserIdentityForDay(login, dayKey string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
-	if !ok || strings.TrimSpace(record.User.ID42) == "" {
+	if ok && strings.TrimSpace(record.User.ID42) != "" {
+		return record.User, nil
+	}
+
+	// Nothing local (no finalized daily summary, no watchdog_users row
+	// either) could supply an id_42 — e.g. a student who was never seen and
+	// never synced at all. Fall back to a live 42 API lookup by login so a
+	// manual post can still be created, and persist it so future lookups
+	// don't need to hit the API again.
+	id42, apiErr := fetchID42ByLogin(login)
+	if apiErr != nil || strings.TrimSpace(id42) == "" {
 		return User{}, fmt.Errorf("could not resolve 42 identity for %s on %s", login, dayKey)
 	}
-	return record.User, nil
+
+	user := record.User
+	user.Login42 = login
+	user.ID42 = id42
+	if user.Profile == 0 {
+		user.Profile = Student
+	}
+	if saveErr := saveUserIdentity(user); saveErr != nil {
+		Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist fetched 42 identity for %s: %v", login, saveErr))
+	}
+	return user, nil
 }
 
 // combineDateAndClock builds a Paris-local instant from a calendar date and a

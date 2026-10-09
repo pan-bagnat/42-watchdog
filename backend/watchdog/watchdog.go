@@ -168,6 +168,41 @@ func FetchMissingFields(login string, userID string) (string, string) {
 	return res[0].Login, strconv.FormatInt(int64(res[0].ID), 10)
 }
 
+// fetchID42ByLogin resolves a student's numeric 42 intra id directly from the
+// 42 v2 API by login, for students who have no local record at all yet (never
+// synced into watchdog_users, e.g. never badged and never seen by any batch
+// job), so a manual attendance post can still be built for them.
+func fetchID42ByLogin(login string) (string, error) {
+	login = strings.ToLower(strings.TrimSpace(login))
+	if login == "" {
+		return "", fmt.Errorf("login is required")
+	}
+
+	resp, err := apiManager.GetClient(config.FTv2).Get(fmt.Sprintf("/users/%s", login))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("42 API returned %s for user %s", resp.Status, login)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var res UserV2
+	if err := json.Unmarshal(body, &res); err != nil {
+		return "", err
+	}
+	if res.ID == 0 {
+		return "", fmt.Errorf("42 API returned no id for user %s", login)
+	}
+	return strconv.Itoa(res.ID), nil
+}
+
 func GetAllowEvents() bool {
 	dest := false
 	acceptEventsMutex.Lock()
