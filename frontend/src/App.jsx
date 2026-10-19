@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const TIMELINE_START_MINUTES = 7 * 60 + 30;
 const TIMELINE_END_MINUTES = 20 * 60 + 30;
@@ -885,17 +885,51 @@ function BadgeDelayChip({ seconds }) {
   );
 }
 
+async function refreshUserPhotoURL(login) {
+  const { response, json } = await requestJSON("/api/users/photo/refresh", {
+    method: "POST",
+    body: JSON.stringify({ login })
+  });
+  if (!response.ok || !json || !json.photo_url) {
+    return null;
+  }
+  return json.photo_url;
+}
+
 function UserAvatar({ user, className = "user-avatar" }) {
   const flags = getUserFlags(user);
   const avatarClassName = [className, flags.isBlacklisted ? "user-avatar-blacklisted" : ""].filter(Boolean).join(" ");
+  const login = user.login_42 || "";
+  const [photoURL, setPhotoURL] = useState(user.photo_url || "");
+  const retriedRef = useRef(false);
+
+  useEffect(() => {
+    setPhotoURL(user.photo_url || "");
+    retriedRef.current = false;
+  }, [user.photo_url]);
+
+  const handleError = useCallback(() => {
+    if (retriedRef.current || !login) {
+      setPhotoURL("");
+      return;
+    }
+    retriedRef.current = true;
+    refreshUserPhotoURL(login)
+      .then((freshURL) => {
+        setPhotoURL(freshURL || "");
+      })
+      .catch(() => {
+        setPhotoURL("");
+      });
+  }, [login]);
 
   return (
     <div className="user-avatar-shell">
-      {user.photo_url ? (
-        <img className={avatarClassName} src={user.photo_url} alt="" />
+      {photoURL ? (
+        <img className={avatarClassName} src={photoURL} alt="" onError={handleError} />
       ) : (
         <div className={`${avatarClassName} user-avatar-fallback`} aria-hidden>
-          {String(user.login_42 || "").slice(0, 2).toUpperCase()}
+          {login.slice(0, 2).toUpperCase()}
         </div>
       )}
     </div>

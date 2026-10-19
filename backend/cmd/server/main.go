@@ -35,6 +35,7 @@ func startHTTPServer(port string) {
 	http.Handle("/api/admin/students/", requireAdminAuth(http.HandlerFunc(adminStudentHandler)))
 	http.Handle("/api/student/detail", requireUserAuth(http.HandlerFunc(studentDetailHandler)))
 	http.Handle("/api/student/me", requireUserAuth(http.HandlerFunc(studentMeHandler)))
+	http.Handle("/api/users/photo/refresh", requireUserAuth(http.HandlerFunc(userPhotoRefreshHandler)))
 	http.Handle("/api/live", requireUserAuth(http.HandlerFunc(liveUpdatesHandler)))
 	http.Handle("/api/live/admin", requireAdminAuth(http.HandlerFunc(adminLiveUpdatesHandler)))
 
@@ -57,6 +58,7 @@ func startHTTPServer(port string) {
 	watchdog.Log("       ├── /api/admin/students")
 	watchdog.Log("       ├── /api/student/detail")
 	watchdog.Log("       ├── /api/student/me")
+	watchdog.Log("       ├── /api/users/photo/refresh")
 	watchdog.Log("       ├── /api/live")
 	watchdog.Log("       ├── /api/live/admin")
 	watchdog.Log("       └── /webhook/access-control")

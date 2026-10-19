@@ -915,6 +915,58 @@ func studentMeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type apiPhotoRefreshRequest struct {
+	Login string `json:"login"`
+}
+
+type apiPhotoRefreshResponse struct {
+	Login    string `json:"login"`
+	PhotoURL string `json:"photo_url"`
+}
+
+func userPhotoRefreshHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	authUser := getAuthenticatedUser(r)
+	if authUser == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	}
+
+	login := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("login")))
+	if login == "" {
+		var req apiPhotoRefreshRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			login = strings.ToLower(strings.TrimSpace(req.Login))
+		}
+	}
+	if login == "" {
+		login = strings.ToLower(strings.TrimSpace(authUser.FtLogin))
+	}
+	if login == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_login", "login is required.")
+		return
+	}
+	if login != strings.ToLower(strings.TrimSpace(authUser.FtLogin)) && !isUserAllowedLoginOverride(authUser) {
+		writeJSONError(w, http.StatusForbidden, "forbidden_login_override", "Only admins can refresh another student's photo.")
+		return
+	}
+
+	photoURL, err := watchdog.ForceRefreshUserPhotoURL(login)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "photo_fetch_failed", "Could not fetch photo from 42 API.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, apiPhotoRefreshResponse{
+		Login:    login,
+		PhotoURL: photoURL,
+	})
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

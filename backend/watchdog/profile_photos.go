@@ -25,6 +25,7 @@ var (
 )
 
 const profilePhotoCacheTTL = 7 * 24 * time.Hour
+const profilePhotoForceRefreshCooldown = time.Minute
 
 func CachedUserPhotoURLOrSchedule(login string) string {
 	login = normalizeLogin(login)
@@ -57,6 +58,26 @@ func CachedUserPhotoURLOrSchedule(login string) string {
 
 	scheduleProfilePhotoFetch(login)
 	return ""
+}
+
+// ForceRefreshUserPhotoURL re-fetches a user's photo from the 42 API, bypassing
+// the normal cache TTL. It still respects a short cooldown so that many
+// broken-image reports for the same user don't hammer the 42 API.
+func ForceRefreshUserPhotoURL(login string) (string, error) {
+	login = normalizeLogin(login)
+	if login == "" {
+		return "", nil
+	}
+
+	now := time.Now()
+	profilePhotoCacheMutex.Lock()
+	if cached, ok := profilePhotoCache[login]; ok && now.Sub(cached.FetchedAt) < profilePhotoForceRefreshCooldown {
+		profilePhotoCacheMutex.Unlock()
+		return cached.URL, nil
+	}
+	profilePhotoCacheMutex.Unlock()
+
+	return FetchUserPhotoURL(login)
 }
 
 func FetchUserPhotoURL(login string) (string, error) {
