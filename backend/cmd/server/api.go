@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -965,6 +966,50 @@ func userPhotoRefreshHandler(w http.ResponseWriter, r *http.Request) {
 		Login:    login,
 		PhotoURL: photoURL,
 	})
+}
+
+// userPhotoImageHandler proxies a user's 42 profile photo, fetching it
+// server-side with the 42 bearer token (the CDN now requires the same
+// authentication as the API) and streaming the bytes back. This lets the
+// frontend use a plain <img src> against our own origin, which carries the
+// user's session cookie, instead of hitting a 42 CDN URL it cannot
+// authenticate against.
+func userPhotoImageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	authUser := getAuthenticatedUser(r)
+	if authUser == nil {
+		writeJSONError(w, http.StatusUnauthorized, "unauthorized", "Authentication is required.")
+		return
+	}
+
+	login := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("login")))
+	if login == "" {
+		login = strings.ToLower(strings.TrimSpace(authUser.FtLogin))
+	}
+	if login == "" {
+		writeJSONError(w, http.StatusBadRequest, "missing_login", "login is required.")
+		return
+	}
+
+	resp, err := watchdog.FetchUserPhotoImage(login)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "photo_fetch_failed", "Could not fetch photo from 42 API.")
+		return
+	}
+	defer resp.Body.Close()
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

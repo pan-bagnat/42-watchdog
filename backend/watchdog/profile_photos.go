@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -109,6 +110,39 @@ func FetchUserPhotoURL(login string) (string, error) {
 	}
 	cacheProfilePhoto(login, url, fetchedAt)
 	return url, nil
+}
+
+// FetchUserPhotoImage retrieves the actual image bytes for a user's photo,
+// authenticating against the 42 CDN with the same bearer token used for the
+// 42 API, since the CDN now requires it too. The caller must close the
+// returned response body.
+func FetchUserPhotoImage(login string) (*http.Response, error) {
+	login = normalizeLogin(login)
+	if login == "" {
+		return nil, fmt.Errorf("missing login")
+	}
+
+	photoURL := CachedUserPhotoURLOrSchedule(login)
+	if photoURL == "" {
+		var err error
+		photoURL, err = FetchUserPhotoURL(login)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if photoURL == "" {
+		return nil, fmt.Errorf("no photo available for %s", login)
+	}
+
+	resp, err := apiManager.GetClient(config.FTv2).RawGet(photoURL)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("42 CDN returned %s", resp.Status)
+	}
+	return resp, nil
 }
 
 func scheduleProfilePhotoFetch(login string) {

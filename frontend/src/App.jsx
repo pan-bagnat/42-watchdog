@@ -896,37 +896,52 @@ async function refreshUserPhotoURL(login) {
   return json.photo_url;
 }
 
+function buildAvatarProxyURL(login, version) {
+  return `/api/users/photo?login=${encodeURIComponent(login)}&v=${version}`;
+}
+
 function UserAvatar({ user, className = "user-avatar" }) {
   const flags = getUserFlags(user);
   const avatarClassName = [className, flags.isBlacklisted ? "user-avatar-blacklisted" : ""].filter(Boolean).join(" ");
   const login = user.login_42 || "";
-  const [photoURL, setPhotoURL] = useState(user.photo_url || "");
+  const [hasPhoto, setHasPhoto] = useState(Boolean(user.photo_url));
+  const [version, setVersion] = useState(0);
   const retriedRef = useRef(false);
 
   useEffect(() => {
-    setPhotoURL(user.photo_url || "");
+    setHasPhoto(Boolean(user.photo_url));
     retriedRef.current = false;
   }, [user.photo_url]);
 
   const handleError = useCallback(() => {
     if (retriedRef.current || !login) {
-      setPhotoURL("");
+      setHasPhoto(false);
       return;
     }
     retriedRef.current = true;
     refreshUserPhotoURL(login)
       .then((freshURL) => {
-        setPhotoURL(freshURL || "");
+        if (freshURL) {
+          setVersion((v) => v + 1);
+          setHasPhoto(true);
+        } else {
+          setHasPhoto(false);
+        }
       })
       .catch(() => {
-        setPhotoURL("");
+        setHasPhoto(false);
       });
   }, [login]);
 
   return (
     <div className="user-avatar-shell">
-      {photoURL ? (
-        <img className={avatarClassName} src={photoURL} alt="" onError={handleError} />
+      {hasPhoto && login ? (
+        <img
+          className={avatarClassName}
+          src={buildAvatarProxyURL(login, version)}
+          alt=""
+          onError={handleError}
+        />
       ) : (
         <div className={`${avatarClassName} user-avatar-fallback`} aria-hidden>
           {login.slice(0, 2).toUpperCase()}
