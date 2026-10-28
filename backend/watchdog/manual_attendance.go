@@ -154,7 +154,7 @@ func PostManualAttendanceForDay(login, dayKey, beginClock, endClock string) (Att
 }
 
 // PostManualAttendance posts an admin-specified attendance range for a student
-// straight to the 42 Chronos API, bypassing the automated batch's blacklist/
+// straight to the 42 Chronos v2 API, bypassing the automated batch's blacklist/
 // AutoPost/school-day gating since this is an explicit, single-shot admin
 // correction rather than the daily automated post. The attempt (success or
 // failure) is always persisted for audit, exactly like the automated posts.
@@ -213,7 +213,7 @@ func PostManualAttendance(login, dayKey string, beginAt, endAt time.Time) (Atten
 		if persistErr := recordAttendancePost(dayKey, user, payload, &statusCode, resp.Status, record.ErrorMessage, false); persistErr != nil {
 			Log(fmt.Sprintf("[WATCHDOG] WARNING: could not persist manual attendance post for %s: %v", login, persistErr))
 		}
-		return record, fmt.Errorf("42 Chronos API returned %s", resp.Status)
+		return record, fmt.Errorf("42 Chronos v2 API returned %s", resp.Status)
 	}
 
 	record.Success = true

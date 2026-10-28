@@ -79,7 +79,6 @@ func fetchAttendanceBoundsForDay(login, dayKey string) (*AttendanceBounds, error
 func fetchAttendanceBoundsForRange(login string, dayStart, dayEnd time.Time) (*AttendanceBounds, error) {
 	windowStart, windowEnd := attendanceWindowUTCTimes(dayStart)
 	query := url.Values{}
-	query.Set("page[size]", "1000")
 	query.Set("begin_at", dayStart.UTC().Format(time.RFC3339))
 	query.Set("end_at", dayEnd.UTC().Format(time.RFC3339))
 	query.Set("time_begin_at", windowStart)
@@ -102,7 +101,7 @@ func fetchAttendanceBoundsForRange(login string, dayStart, dayEnd time.Time) (*A
 		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("42 Chronos API returned %s", resp.Status)
+		return nil, fmt.Errorf("42 Chronos v2 API returned %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -179,7 +178,6 @@ func fetchCFAAttendanceRecords(login, dayKey string) ([]AttendanceBounds, error)
 	windowStart, windowEnd := attendanceWindowUTCTimes(dayStart)
 
 	query := url.Values{}
-	query.Set("page[size]", "1000")
 	query.Set("begin_at", dayStart.UTC().Format(time.RFC3339))
 	query.Set("end_at", dayEnd.UTC().Format(time.RFC3339))
 	query.Set("time_begin_at", windowStart)
@@ -201,7 +199,7 @@ func fetchCFAAttendanceRecords(login, dayKey string) ([]AttendanceBounds, error)
 		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("42 Chronos API returned %s", resp.Status)
+		return nil, fmt.Errorf("42 Chronos v2 API returned %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -255,7 +253,6 @@ func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*Attendan
 	windowStart, windowEnd := attendanceWindowUTCTimes(monthStart)
 
 	query := url.Values{}
-	query.Set("page[size]", "1000")
 	query.Set("begin_at", monthStart.UTC().Format(time.RFC3339))
 	query.Set("end_at", monthEnd.UTC().Format(time.RFC3339))
 	query.Set("time_begin_at", windowStart)
@@ -278,7 +275,7 @@ func fetchAttendanceBoundsForMonth(login, monthKey string) (map[string]*Attendan
 		return map[string]*AttendanceBounds{}, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("42 Chronos API returned %s", resp.Status)
+		return nil, fmt.Errorf("42 Chronos v2 API returned %s", resp.Status)
 	}
 
 	body, err := io.ReadAll(resp.Body)

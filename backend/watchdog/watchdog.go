@@ -483,8 +483,26 @@ type APIAttendance struct {
 	Begin_at  string `json:"begin_at"`
 	End_at    string `json:"end_at"`
 	Source    string `json:"source"`
-	Campus_id int    `json:"campus_id"`
-	User_id   int    `json:"user_id"`
+	Campus_id FlexID `json:"campus_id"`
+	User_id   FlexID `json:"user_id"`
+}
+
+// FlexID is an identifier sent as a JSON string (Chronos v2) that also accepts
+// bare JSON numbers, so payloads persisted by the Chronos v1 client still load.
+type FlexID string
+
+func (id *FlexID) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*id = FlexID(text)
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err != nil {
+		return err
+	}
+	*id = FlexID(number.String())
+	return nil
 }
 
 func getCampusID() int {
@@ -508,8 +526,8 @@ func buildAttendancePayload(user User) (APIAttendance, error) {
 		Begin_at:  user.FirstAccess.UTC().Format(time.RFC3339),
 		End_at:    user.LastAccess.UTC().Format(time.RFC3339),
 		Source:    "access-control",
-		Campus_id: getCampusID(),
-		User_id:   id42,
+		Campus_id: FlexID(strconv.Itoa(getCampusID())),
+		User_id:   FlexID(strconv.Itoa(id42)),
 	}, nil
 }
 
